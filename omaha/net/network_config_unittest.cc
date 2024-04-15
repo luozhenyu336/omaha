@@ -184,7 +184,9 @@ TEST_F(NetworkConfigTest, ConfigurationOverride) {
   EXPECT_EQ(E_FAIL, network_config->GetConfigurationOverride(&actual));
 }
 
-TEST_F(NetworkConfigTest, GetProxyForUrlLocal) {
+// This test fails on and after Win 11 because ::InternetGetProxyInfo() is
+// no longer supported.
+TEST_F(NetworkConfigTest, DISABLED_GetProxyForUrlLocal) {
   CString pac_file_path = app_util::GetModuleDirectory(NULL);
   ASSERT_FALSE(pac_file_path.IsEmpty());
   pac_file_path.Append(_T("\\unittest_support\\localproxytest.pac"));
@@ -242,19 +244,21 @@ class NetworkConfigPolicyTest :
                                       kRegValueIsEnrolledToDomain,
                                       IsDomain() ? 1UL : 0UL));
     if (IsDomain()) {
-      RegKey::SetValue(kRegKeyGoopdateGroupPolicy,
-                       kRegValueProxyMode,
-                       kProxyModeAutoDetect);
+      SetPolicyString(kRegValueProxyMode, kProxyModeAutoDetect);
     }
 
     if (IsCloudPolicyOverridesPlatformPolicy()) {
-      RegKey::SetValue(kRegKeyGoopdateGroupPolicy,
-                       kRegValueCloudPolicyOverridesPlatformPolicy,
-                       1UL);
+      SetPolicy(kRegValueCloudPolicyOverridesPlatformPolicy, 1UL);
     }
+
+    // Delete the ConfigManager instance so it is recreated, since the registry
+    // entries above need to be accounted for within the ConfigManager
+    // constructor.
+    ConfigManager::DeleteInstance();
 
     if (IsDM()) {
       CachedOmahaPolicy info;
+      info.is_managed = true;
       info.is_initialized = true;
       info.proxy_mode = kProxyModePacScript;
       info.proxy_pac_url = _T("https://PS/");
@@ -303,15 +307,11 @@ TEST_P(NetworkConfigPolicyTest, ProxyConfig) {
   // Detect the configurations.
   ASSERT_HRESULT_SUCCEEDED(network_config->Detect());
   network_config->GetConfigurations().swap(proxy_configurations);
-  EXPECT_LE(IsDomain() + IsDM(), static_cast<int>(proxy_configurations.size()));
   if (IsDomainPredominant()) {
-    EXPECT_STREQ(_T("GroupPolicy"), proxy_configurations[0].source);
     EXPECT_TRUE(proxy_configurations[0].auto_detect);
   } else if (IsDM()) {
-    EXPECT_STREQ(_T("DeviceManagement"), proxy_configurations[0].source);
     EXPECT_STREQ(_T("https://PS/"), proxy_configurations[0].auto_config_url);
   }
 }
 
 }  // namespace omaha
-

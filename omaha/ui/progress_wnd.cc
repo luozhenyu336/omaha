@@ -189,12 +189,13 @@ LRESULT ProgressWnd::OnInitDialog(UINT message,
   UNREFERENCED_PARAMETER(handled);
 
   InitializeDialog();
+  GetWindowText(CStrBuf(base_window_title_, 256), 256);
 
   VERIFY_SUCCEEDED(SetMarqueeMode(true));
 
   CString state_text;
   VERIFY1(state_text.LoadString(IDS_INITIALIZING));
-  VERIFY1(::SetWindowText(GetDlgItem(IDC_INSTALLER_STATE_TEXT), state_text));
+  DisplayNewState(state_text);
   VERIFY_SUCCEEDED(ChangeControlState());
 
   metrics_timer_.reset(new HighresTimer);
@@ -360,7 +361,7 @@ LRESULT ProgressWnd::OnInstallStopped(UINT msg,
 void ProgressWnd::HandleCancelRequest() {
   CString s;
   VERIFY1(s.LoadString(IDS_CANCELING));
-  VERIFY1(::SetWindowText(GetDlgItem(IDC_INSTALLER_STATE_TEXT), s));
+  DisplayNewState(s);
 
   if (is_canceled_) {
     return;
@@ -387,7 +388,7 @@ void ProgressWnd::OnCheckingForUpdate() {
 
   CString s;
   VERIFY1(s.LoadString(IDS_WAITING_TO_CONNECT));
-  VERIFY1(::SetWindowText(GetDlgItem(IDC_INSTALLER_STATE_TEXT), s));
+  DisplayNewState(s);
 
   VERIFY_SUCCEEDED(ChangeControlState());
 }
@@ -402,21 +403,6 @@ void ProgressWnd::OnUpdateAvailable(const CString& app_id,
   UNREFERENCED_PARAMETER(version_string);
 
   ASSERT1(thread_id() == ::GetCurrentThreadId());
-
-  if (!app_id.CompareNoCase(kChromeAppId)) {
-    HBITMAP app_bitmap = reinterpret_cast<HBITMAP>(::LoadImage(
-        app_util::GetCurrentModuleHandle(),
-        MAKEINTRESOURCE(IDB_CHROME),
-        IMAGE_BITMAP,
-        0,
-        0,
-        LR_SHARED));
-    ASSERT1(app_bitmap);
-    SendDlgItemMessage(IDC_APP_BITMAP,
-                       STM_SETIMAGE,
-                       IMAGE_BITMAP,
-                       reinterpret_cast<LPARAM>(app_bitmap));
-  }
 
   if (!IsWindow()) {
     return;
@@ -438,7 +424,7 @@ void ProgressWnd::OnWaitingToDownload(const CString& app_id,
 
   CString s;
   VERIFY1(s.LoadString(IDS_WAITING_TO_DOWNLOAD));
-  VERIFY1(::SetWindowText(GetDlgItem(IDC_INSTALLER_STATE_TEXT), s));
+  DisplayNewState(s);
 
   VERIFY_SUCCEEDED(ChangeControlState());
 }
@@ -491,7 +477,7 @@ void ProgressWnd::OnDownloading(const CString& app_id,
   // Reduces flicker by only updating the control if the text has changed.
   CString orig_text;
   if (!GetDlgItemText(IDC_INSTALLER_STATE_TEXT, orig_text) || s != orig_text) {
-    VERIFY1(::SetWindowText(GetDlgItem(IDC_INSTALLER_STATE_TEXT), s));
+    DisplayNewState(s);
   }
 
   VERIFY_SUCCEEDED(ChangeControlState());
@@ -524,7 +510,7 @@ void ProgressWnd::OnWaitingRetryDownload(const CString& app_id,
     int retry_time_in_sec =
         static_cast<int>(CeilingDivide(next_retry_time - now, kSecsTo100ns));
     s.FormatMessage(IDS_DOWNLOAD_RETRY, retry_time_in_sec);
-    VERIFY1(::SetWindowText(GetDlgItem(IDC_INSTALLER_STATE_TEXT), s));
+    DisplayNewState(s);
     VERIFY_SUCCEEDED(ChangeControlState());
   }
 }
@@ -547,7 +533,7 @@ void ProgressWnd::OnWaitingToInstall(const CString& app_id,
 
     CString s;
     VERIFY1(s.LoadString(IDS_WAITING_TO_INSTALL));
-    VERIFY1(::SetWindowText(GetDlgItem(IDC_INSTALLER_STATE_TEXT), s));
+    DisplayNewState(s);
 
     VERIFY_SUCCEEDED(ChangeControlState());
   }
@@ -581,7 +567,7 @@ void ProgressWnd::OnInstalling(const CString& app_id,
 
     CString s;
     VERIFY1(s.LoadString(IDS_INSTALLING));
-    VERIFY1(::SetWindowText(GetDlgItem(IDC_INSTALLER_STATE_TEXT), s));
+    DisplayNewState(s);
 
     VERIFY_SUCCEEDED(ChangeControlState());
   }
@@ -681,7 +667,8 @@ void ProgressWnd::OnComplete(const ObserverCompletionInfo& observer_info) {
   // TODO(omaha3): Do we want to avoid launching commands during an interactive
   // /ua update? If so, we'll need to handle that somehow. Using the observer
   // handles the silent update and install cases as well as the OnDemand case.
-  bool launch_commands_succeeded = LaunchCmdLines(observer_info);
+  bool launch_commands_succeeded = LaunchCommandLines(observer_info,
+                                                      is_machine());
 
   CString s;
   CompletionCodes overall_completion_code =
@@ -787,52 +774,6 @@ void ProgressWnd::OnComplete(const ObserverCompletionInfo& observer_info) {
   VERIFY_SUCCEEDED(ChangeControlState());
 }
 
-HRESULT ProgressWnd::LaunchCmdLine(const AppCompletionInfo& app_info) {
-  CORE_LOG(L3, (_T("[ProgressWnd::LaunchCmdLine][%s]"),
-                app_info.post_install_launch_command_line));
-  if (app_info.post_install_launch_command_line.IsEmpty()) {
-    return S_OK;
-  }
-
-  if (app_info.completion_code != COMPLETION_CODE_LAUNCH_COMMAND &&
-      app_info.completion_code !=
-          COMPLETION_CODE_EXIT_SILENTLY_ON_LAUNCH_COMMAND) {
-    CORE_LOG(LW, (_T("Launch command line [%s] is not empty but completion ")
-                  _T("code [%d] doesn't require a launch"),
-                  app_info.post_install_launch_command_line.GetString(),
-                  app_info.completion_code));
-    return S_OK;
-  }
-
-  ASSERT1(SUCCEEDED(app_info.error_code));
-  ASSERT1(!app_info.is_noupdate);
-
-  HRESULT hr = goopdate_utils::LaunchCmdLine(
-      is_machine(), app_info.post_install_launch_command_line, NULL, NULL);
-  if (FAILED(hr)) {
-    CORE_LOG(LE, (_T("[goopdate_utils::LaunchCmdLine failed][0x%x]"), hr));
-    return hr;
-  }
-
-  return S_OK;
-}
-
-bool ProgressWnd::LaunchCmdLines(const ObserverCompletionInfo& info) {
-  bool  result = true;
-
-  CORE_LOG(L3, (_T("[ProgressWnd::LaunchCmdLines]")));
-  for (size_t i = 0; i < info.apps_info.size(); ++i) {
-    const AppCompletionInfo& app_info = info.apps_info[i];
-    if (FAILED(app_info.error_code)) {
-      continue;
-    }
-    result &= SUCCEEDED(LaunchCmdLine(app_info));
-    VERIFY1(result);
-  }
-
-  return result;
-}
-
 HRESULT ProgressWnd::ChangeControlState() {
   for (size_t i = 0; i != arraysize(ctls_); ++i) {
     const ControlState& ctl_state = ctls_[i];
@@ -855,6 +796,16 @@ HRESULT ProgressWnd::SetMarqueeMode(bool is_marquee) {
   return S_OK;
 }
 
+void ProgressWnd::DisplayNewState(const CString& state) {
+  VERIFY1(::SetWindowText(GetDlgItem(IDC_INSTALLER_STATE_TEXT), state));
+
+  CString title;
+  title.FormatMessage(IDS_APPLICATION_NAME_CONCATENATION,
+                      state,
+                      base_window_title_);
+  SetWindowText(title);
+}
+
 bool ProgressWnd::IsInstallStoppedWindowPresent() {
   return install_stopped_wnd_.get() && install_stopped_wnd_->IsWindow();
 }
@@ -870,4 +821,3 @@ bool ProgressWnd::CloseInstallStoppedWindow() {
 }
 
 }  // namespace omaha
-

@@ -52,19 +52,12 @@ using omaha::encrypt::DecryptData;
 
 namespace omaha {
 
-#if _MSC_VER >= 1900
-using std::unordered_set;
-#else
-template <typename T> using unordered_set = stdext::hash_set<T>;
-#endif
-
-// Computes the hash value of a ProxyConfig object. Names in the stdext
-// namespace are not currently part of the ISO C++ standard.
+// Computes the hash value of a ProxyConfig object.
 size_t hash_value(const ProxyConfig& config) {
-  size_t hash = stdext::hash_value(config.auto_detect)                 ^
-                stdext::hash_value(config.auto_config_url.GetString()) ^
-                stdext::hash_value(config.proxy.GetString())           ^
-                stdext::hash_value(config.proxy_bypass.GetString());
+  size_t hash = std::hash<bool>{}(config.auto_detect)                 ^
+                std::hash<std::wstring>{}(config.auto_config_url.GetString()) ^
+                std::hash<std::wstring>{}(config.proxy.GetString())           ^
+                std::hash<std::wstring>{}(config.proxy_bypass.GetString());
   return hash;
 }
 
@@ -134,19 +127,7 @@ HRESULT NetworkConfig::Initialize() {
   }
 
   Add(new UpdateDevProxyDetector);
-
-  DWORD cloud_policy_preferred(0);
-  if (SUCCEEDED(RegKey::GetValue(kRegKeyGoopdateGroupPolicy,
-                                 kRegValueCloudPolicyOverridesPlatformPolicy,
-                                 &cloud_policy_preferred)) &&
-      cloud_policy_preferred) {
-    Add(new DMProxyDetector);
-    Add(new GroupPolicyProxyDetector);
-  } else {
-    Add(new GroupPolicyProxyDetector);
-    Add(new DMProxyDetector);
-  }
-
+  Add(new PolicyProxyDetector);
   Add(new IEWPADProxyDetector);
   Add(new IEPACProxyDetector);
   Add(new IENamedProxyDetector);
@@ -483,7 +464,7 @@ void NetworkConfig::RemoveDuplicates(std::vector<ProxyConfig>* config) {
   std::vector<ProxyConfig> input(*config);
   config->clear();
 
-  typedef unordered_set<size_t> Keys;
+  typedef std::unordered_set<size_t> Keys;
   Keys keys;
   for (size_t i = 0; i != input.size(); ++i) {
     const size_t hash = hash_value(input[i]);
@@ -613,7 +594,7 @@ GPA_WRAP(jsproxy.dll,
 HRESULT NetworkConfig::GetProxyForUrlLocal(const CString& url,
                                            const CString& path_to_pac_file,
                                            HttpClient::ProxyInfo* proxy_info) {
-  scoped_library jsproxy_lib(::LoadLibrary(_T("jsproxy.dll")));
+  scoped_library jsproxy_lib(LoadSystemLibrary(_T("jsproxy.dll")));
   ASSERT1(jsproxy_lib);
   if (!jsproxy_lib) {
     HRESULT hr = HRESULTFromLastError();

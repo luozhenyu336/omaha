@@ -17,9 +17,6 @@ Import('env')
 
 exe_env = env.Clone()
 omaha_version_info = exe_env['omaha_versions_info'][0]
-exe_env['CPPPATH'] += [
-    '$OBJ_ROOT',
-    ]
 exe_env.Append(
     CCFLAGS = [
         '/wd4548',
@@ -33,7 +30,6 @@ exe_env.Append(
         'imagehlp.lib',
         'iphlpapi.lib',
         'kernel32.lib',
-        'msi.lib',
         'msimg32.lib',
         'mstask.lib',
         'netapi32.lib',
@@ -104,7 +100,7 @@ unsigned_exe = exe_env.ComponentProgram(
     prog_name='%s_unsigned.exe' % exe_name,
     source=exe_inputs,
 )
-signed_exe = exe_env.DualSignedBinary(
+signed_exe = exe_env.SignedBinary(
     target='%s.exe' % exe_name,
     source=unsigned_exe,
 )

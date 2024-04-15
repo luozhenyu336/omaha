@@ -32,7 +32,7 @@ void BuildRequest(const App* app,
     return;
   }
 
-  if (!app->is_eula_accepted()) {
+  if (!app->is_eula_accepted() && !app->app_bundle()->is_offline_install()) {
     CORE_LOG(L3, (_T("[App EULA not accepted - not including app in ping][%s]"),
                   app->app_guid_string()));
     return;
@@ -94,6 +94,7 @@ void BuildRequest(const App* app,
         app->IsRollbackToTargetVersionAllowed();
     request_app.update_check.target_version_prefix =
         app->GetTargetVersionPrefix();
+    request_app.update_check.target_channel = app->GetTargetChannel();
   }
 
   request_app.ping_events = app->ping_events();

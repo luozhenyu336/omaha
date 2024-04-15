@@ -47,6 +47,7 @@ void VerifyCommandLineArgs(const CommandLineArgs& expected,
   EXPECT_EQ(expected.is_machine_set, actual.is_machine_set);
   EXPECT_EQ(expected.is_install_elevated, actual.is_install_elevated);
   EXPECT_EQ(expected.is_silent_set, actual.is_silent_set);
+  EXPECT_EQ(expected.is_always_launch_cmd_set, actual.is_always_launch_cmd_set);
   EXPECT_EQ(expected.is_eula_required_set, actual.is_eula_required_set);
   EXPECT_EQ(expected.is_enterprise_set, actual.is_enterprise_set);
   EXPECT_EQ(expected.is_offline_set, actual.is_offline_set);
@@ -113,7 +114,7 @@ void VerifyCommandLineExtraArgs(const CommandLineExtraArgs& expected_val,
 #endif
   EXPECT_EQ(expected_val.browser_type, actual_val.browser_type);
   EXPECT_EQ(expected_val.usage_stats_enable, actual_val.usage_stats_enable);
-  EXPECT_EQ(expected_val.runtime_only, actual_val.runtime_only);
+  EXPECT_EQ(expected_val.runtime_mode, actual_val.runtime_mode);
 
   EXPECT_EQ(expected_val.apps.size(), actual_val.apps.size());
 
@@ -300,9 +301,9 @@ TEST_F(CommandLineTest, ParseCommandLine_Install) {
                              _T("{C7A9A2F5-C4F9-42d3-8A8B-55086A205468}&")
                              _T("appname=TestApp&needsadmin=true&lang=en")
 #if defined(HAS_DEVICE_MANAGEMENT)
-                            _T("&etoken=f6f767ba-8cfb-4d95-a26a-b3d714ddf1a2")
+                             _T("&etoken=f6f767ba-8cfb-4d95-a26a-b3d714ddf1a2")
 #endif
-                             ;
+                             _T("");
   CommandLineAppArgs app_args;
   const GUID expected_guid = {0xA4F7B07B, 0xB9BD, 0x4A33,
                               {0xB1, 0x36, 0x96, 0xD2, 0xAD, 0xFB, 0x60, 0xCB}};
@@ -425,6 +426,20 @@ TEST_F(CommandLineTest, ParseCommandLine_InstallWithAppArgsSilent) {
 
   expected_.mode = COMMANDLINE_MODE_INSTALL;
   expected_.is_silent_set = true;
+  VerifyArgsWithSingleYouTubeUploaderEnApp(expected_, args_, true, true);
+}
+
+// Parse <path> /install "extraargs" /appargs <appargs> /silent /alwayslaunchcmd
+TEST_F(CommandLineTest,
+       ParseCommandLine_InstallWithAppArgsSilentAlwaysLaunchCmd) {
+  const TCHAR* kCmdLine = _T("goopdate.exe /install ") YOUTUBEUPLOADEREN_TAG
+                          _T(" /appargs ") YOUTUBEUPLOADEREN_APP_ARGS
+                          _T(" /silent /alwayslaunchcmd");
+  EXPECT_SUCCEEDED(ParseCommandLine(kCmdLine, &args_));
+
+  expected_.mode = COMMANDLINE_MODE_INSTALL;
+  expected_.is_silent_set = true;
+  expected_.is_always_launch_cmd_set = true;
   VerifyArgsWithSingleYouTubeUploaderEnApp(expected_, args_, true, true);
 }
 
@@ -667,6 +682,18 @@ TEST_F(CommandLineTest, ParseCommandLine_HandoffSilent) {
 
   expected_.mode = COMMANDLINE_MODE_HANDOFF_INSTALL;
   expected_.is_silent_set = true;
+  VerifyArgsWithSingleYouTubeUploaderEnApp(expected_, args_, false, true);
+}
+
+// Parse: <path> /handoff "extraargs" /silent /alwayslaunchcmd
+TEST_F(CommandLineTest, ParseCommandLine_HandoffSilentAlwaysLaunchCmd) {
+  const TCHAR* kCmdLine = _T("goopdate.exe /handoff ") YOUTUBEUPLOADEREN_TAG
+                          _T(" /silent /alwayslaunchcmd");
+  EXPECT_SUCCEEDED(ParseCommandLine(kCmdLine, &args_));
+
+  expected_.mode = COMMANDLINE_MODE_HANDOFF_INSTALL;
+  expected_.is_silent_set = true;
+  expected_.is_always_launch_cmd_set = true;
   VerifyArgsWithSingleYouTubeUploaderEnApp(expected_, args_, false, true);
 }
 
@@ -1211,15 +1238,6 @@ TEST_F(CommandLineTest, ParseCommandLine_HealthCheck) {
   EXPECT_SUCCEEDED(ParseCommandLine(kCmdLine, &args_));
 
   expected_.mode = COMMANDLINE_MODE_HEALTH_CHECK;
-  VerifyCommandLineArgs(expected_, args_);
-}
-
-// Parse: <path> /registermsihelper
-TEST_F(CommandLineTest, ParseCommandLine_RegisterMsiHelper) {
-  const TCHAR* kCmdLine = _T("goopdate.exe /registermsihelper");
-  EXPECT_SUCCEEDED(ParseCommandLine(kCmdLine, &args_));
-
-  expected_.mode = COMMANDLINE_MODE_REGISTER_MSI_HELPER;
   VerifyCommandLineArgs(expected_, args_);
 }
 

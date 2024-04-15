@@ -633,7 +633,6 @@ CurrentState App::state() const {
 
 bool App::is_update() const {
   __mutexScope(model()->lock());
-  ASSERT1(current_version_->version().IsEmpty() != is_update_);
   return is_update_;
 }
 
@@ -927,8 +926,8 @@ HRESULT App::CheckGroupPolicy() const {
     if (!ConfigManager::Instance()->CanUpdateApp(
              app_guid_,
              !app_bundle_->is_auto_update())) {
-      if (ConfigManager::Instance()->GetEffectivePolicyForAppUpdates(app_guid_)
-          == kPolicyAutomaticUpdatesOnly) {
+      if (ConfigManager::Instance()->GetEffectivePolicyForAppUpdates(
+          app_guid_, NULL) == kPolicyAutomaticUpdatesOnly) {
         // This return code allows Omaha clients to show a message indicating
         // Manual Updates are disabled, but Automatic Updates are enabled. This
         // is to reassure end-users that administrators have enabled automatic
@@ -948,16 +947,23 @@ HRESULT App::CheckGroupPolicy() const {
   return S_OK;
 }
 
+CString App::GetTargetChannel() const {
+  __mutexScope(model()->lock());
+
+  return ConfigManager::Instance()->GetTargetChannel(app_guid_, NULL);
+}
+
 bool App::IsRollbackToTargetVersionAllowed() const {
   __mutexScope(model()->lock());
 
-  return ConfigManager::Instance()->IsRollbackToTargetVersionAllowed(app_guid_);
+  return ConfigManager::Instance()->IsRollbackToTargetVersionAllowed(app_guid_,
+                                                                     NULL);
 }
 
 CString App::GetTargetVersionPrefix() const {
   __mutexScope(model()->lock());
 
-  return ConfigManager::Instance()->GetTargetVersionPrefix(app_guid_);
+  return ConfigManager::Instance()->GetTargetVersionPrefix(app_guid_, NULL);
 }
 
 void App::UpdateNumBytesDownloaded(uint64 num_bytes) {

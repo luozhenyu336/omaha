@@ -30,9 +30,6 @@ class SetupGoogleUpdate {
 
   HRESULT FinishInstall();
 
-  // Installs the helper (MSI).
-  HRESULT InstallMsiHelper();
-
   // Uninstalls Google Update registrations created by FinishInstall().
   void Uninstall();
 
@@ -77,9 +74,6 @@ class SetupGoogleUpdate {
 
   // Register COM classes and interfaces.
   HRESULT RegisterOrUnregisterCOMLocalServer(bool register_server);
-
-  // Uninstalls the helper (MSI).
-  HRESULT UninstallMsiHelper();
 
   // Build the install file path for support files. For example,
   CString BuildSupportFileInstallPath(const CString& filename) const;

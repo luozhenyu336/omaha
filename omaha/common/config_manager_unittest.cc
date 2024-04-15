@@ -37,7 +37,7 @@ namespace {
 
 // OMAHA_KEY_REL == "Software\Google\Update"
 #define OMAHA_KEY_REL \
-    _T("Software\\") SHORT_COMPANY_NAME _T("\\") PRODUCT_NAME
+    _T("Software\\") PATH_COMPANY_NAME _T("\\") PRODUCT_NAME
 
 
 #define APP_GUID1 _T("{6762F466-8863-424f-817C-5757931F346E}")
@@ -56,26 +56,15 @@ const TCHAR* const kAppMachineClientStatePath2 =
 const TCHAR* const kAppUserClientStatePath2 =
     _T("HKCU\\") OMAHA_KEY_REL _T("\\ClientState\\") APP_GUID2;
 
-const TCHAR* const kPolicyKey =
-    _T("HKLM\\Software\\Policies\\")
-    SHORT_COMPANY_NAME _T("\\") PRODUCT_NAME _T("\\");
 const TCHAR* const kInstallPolicyApp1 = _T("Install") APP_GUID1;
 const TCHAR* const kInstallPolicyApp2 = _T("Install") APP_GUID2;
 const TCHAR* const kUpdatePolicyApp1 = _T("Update") APP_GUID1;
 const TCHAR* const kUpdatePolicyApp2 = _T("Update") APP_GUID2;
 
-HRESULT SetPolicy(const TCHAR* policy_name, DWORD value) {
-  return RegKey::SetValue(kPolicyKey, policy_name, value);
-}
-
-HRESULT SetPolicyString(const TCHAR* policy_name, const CString& value) {
-  return RegKey::SetValue(kPolicyKey, policy_name, value);
-}
-
 #if defined(HAS_DEVICE_MANAGEMENT)
 
 const TCHAR* const kCloudManagementPolicyKey =
-    _T("HKLM\\Software\\Policies\\") SHORT_COMPANY_NAME
+    _T("HKLM\\Software\\Policies\\") PATH_COMPANY_NAME
     _T("\\CloudManagement\\");
 
 HRESULT SetCloudManagementPolicy(const TCHAR* policy_name, DWORD value) {
@@ -116,23 +105,31 @@ class ConfigManagerNoOverrideTest : public testing::Test {
   }
 
   DWORD GetEffectivePolicyForAppInstalls(const TCHAR* guid) {
-    return cm_->GetEffectivePolicyForAppInstalls(StringToGuid(guid));
+    return cm_->GetEffectivePolicyForAppInstalls(StringToGuid(guid), NULL);
   }
 
   DWORD GetEffectivePolicyForAppUpdates(const TCHAR* guid) {
-    return cm_->GetEffectivePolicyForAppUpdates(StringToGuid(guid));
+    return cm_->GetEffectivePolicyForAppUpdates(StringToGuid(guid), NULL);
+  }
+
+  CString GetTargetChannel(const TCHAR* guid) {
+    return cm_->GetTargetChannel(StringToGuid(guid), NULL);
   }
 
   CString GetTargetVersionPrefix(const TCHAR* guid) {
-    return cm_->GetTargetVersionPrefix(StringToGuid(guid));
+    return cm_->GetTargetVersionPrefix(StringToGuid(guid), NULL);
   }
 
   bool IsRollbackToTargetVersionAllowed(const TCHAR* guid) {
-    return cm_->IsRollbackToTargetVersionAllowed(StringToGuid(guid));
+    return cm_->IsRollbackToTargetVersionAllowed(StringToGuid(guid), NULL);
   }
 
-  bool AreUpdatesSuppressedNow() {
-    return cm_->AreUpdatesSuppressedNow();
+  bool AreUpdatesSuppressedNow(const CTime& now = CTime::GetCurrentTime()) {
+    return cm_->AreUpdatesSuppressedNow(now);
+  }
+
+  DWORD GetForceInstallApps(bool is_machine, std::vector<CString>* app_ids) {
+    return cm_->GetForceInstallApps(is_machine, app_ids, NULL);
   }
 
   ConfigManager* cm_;
@@ -222,6 +219,7 @@ class ConfigManagerTest
 
   void SetCannedCachedOmahaPolicy() {
     CachedOmahaPolicy info;
+    info.is_managed = true;
     info.is_initialized = true;
     info.auto_update_check_period_minutes = 111;
     info.download_preference = kDownloadPreferenceCacheable;
@@ -232,13 +230,23 @@ class ConfigManagerTest
     info.install_default = kPolicyEnabled;
     info.update_default = kPolicyEnabled;
 
-    ApplicationSettings app;
-    app.install = kPolicyDisabled;
-    app.update = kPolicyAutomaticUpdatesOnly;
-    app.target_version_prefix = _T("3.6.55");
-    app.rollback_to_target_version = true;
+    ApplicationSettings chrome_app;
+    chrome_app.install = kPolicyDisabled;
+    chrome_app.update = kPolicyAutomaticUpdatesOnly;
+    chrome_app.target_channel = _T("dev");
+    chrome_app.target_version_prefix = _T("3.6.55");
+    chrome_app.rollback_to_target_version = true;
     info.application_settings.insert(std::make_pair(StringToGuid(kChromeAppId),
-                                                    app));
+                                                    chrome_app));
+    ApplicationSettings app1;
+    app1.install = kPolicyForceInstallMachine;
+    info.application_settings.insert(std::make_pair(StringToGuid(kAppGuid1),
+                                                    app1));
+
+    ApplicationSettings app2;
+    app2.install = kPolicyForceInstallUser;
+    info.application_settings.insert(std::make_pair(StringToGuid(kAppGuid2),
+                                                    app2));
     cm_->SetOmahaDMPolicies(info);
   }
 
@@ -395,19 +403,19 @@ TEST_F(ConfigManagerNoOverrideTest, RegistryKeys) {
   EXPECT_STREQ(_T("HKLM\\") OMAHA_KEY_REL _T("\\"),
                cm_->registry_update(true));
 
-  EXPECT_STREQ(_T("HKCU\\Software\\") COMPANY_NAME_IDENTIFIER _T("\\"),
+  EXPECT_STREQ(_T("HKCU\\Software\\") PATH_COMPANY_NAME _T("\\"),
                cm_->user_registry_google());
-  EXPECT_STREQ(_T("HKLM\\Software\\") COMPANY_NAME_IDENTIFIER _T("\\"),
+  EXPECT_STREQ(_T("HKLM\\Software\\") PATH_COMPANY_NAME _T("\\"),
                cm_->machine_registry_google());
-  EXPECT_STREQ(_T("HKCU\\Software\\") COMPANY_NAME_IDENTIFIER _T("\\"),
+  EXPECT_STREQ(_T("HKCU\\Software\\") PATH_COMPANY_NAME _T("\\"),
                cm_->registry_google(false));
-  EXPECT_STREQ(_T("HKLM\\Software\\") COMPANY_NAME_IDENTIFIER _T("\\"),
+  EXPECT_STREQ(_T("HKLM\\Software\\") PATH_COMPANY_NAME _T("\\"),
                cm_->registry_google(true));
 }
 
 TEST_F(ConfigManagerNoOverrideTest, GetUserCrashReportsDir) {
-  const CString expected_path = GetGoogleUserPath() + _T("CrashReports");
-  EXPECT_SUCCEEDED(DeleteTestDirectory(expected_path));
+  const CString expected_path = app_util::GetTempDir();
+  EXPECT_FALSE(expected_path.IsEmpty());
   EXPECT_STREQ(expected_path, cm_->GetUserCrashReportsDir());
   EXPECT_TRUE(File::Exists(expected_path));
 }
@@ -452,11 +460,18 @@ TEST_F(ConfigManagerNoOverrideTest, GetTempDownloadDir) {
 }
 
 TEST_F(ConfigManagerNoOverrideTest, GetMachineCrashReportsDir) {
-  CString program_files;
-  EXPECT_SUCCEEDED(GetFolderPath(CSIDL_PROGRAM_FILES, &program_files));
-  const CString expected_path =
-      program_files + _T("\\") + SHORT_COMPANY_NAME + _T("\\CrashReports");
-  EXPECT_SUCCEEDED(DeleteTestDirectory(expected_path));
+  CString windir;
+  EXPECT_SUCCEEDED(GetFolderPath(CSIDL_WINDOWS, &windir));
+  CString expected_path = windir + _T("\\SystemTemp");
+
+  if (!File::IsDirectory(expected_path)) {
+    CString program_files;
+    EXPECT_SUCCEEDED(GetFolderPath(CSIDL_PROGRAM_FILES, &program_files));
+    expected_path =
+        program_files + _T("\\") + PATH_COMPANY_NAME + _T("\\Temp");
+    EXPECT_SUCCEEDED(DeleteTestDirectory(expected_path));
+  }
+
   EXPECT_STREQ(expected_path, cm_->GetMachineCrashReportsDir());
   EXPECT_TRUE(File::Exists(expected_path) || !vista_util::IsUserAdmin());
 }
@@ -487,6 +502,31 @@ TEST_F(ConfigManagerNoOverrideTest, GetMachineSecureOfflineStorageDir) {
   EXPECT_SUCCEEDED(DeleteTestDirectory(expected_path));
   EXPECT_STREQ(expected_path, cm_->GetMachineSecureOfflineStorageDir());
   EXPECT_TRUE(File::Exists(expected_path) || !vista_util::IsUserAdmin());
+}
+
+TEST_F(ConfigManagerNoOverrideTest, GetTempDir) {
+  CString expected_path;
+
+  if (::IsUserAnAdmin()) {
+    CString windir;
+    EXPECT_SUCCEEDED(GetFolderPath(CSIDL_WINDOWS, &windir));
+    expected_path = windir + _T("\\SystemTemp");
+
+    if (!File::IsDirectory(expected_path)) {
+      CString program_files;
+      EXPECT_SUCCEEDED(GetFolderPath(CSIDL_PROGRAM_FILES, &program_files));
+      expected_path = program_files + _T("\\") +
+                      PATH_COMPANY_NAME +
+                      _T("\\Temp");
+      EXPECT_SUCCEEDED(DeleteTestDirectory(expected_path));
+    }
+  } else {
+    expected_path = app_util::GetTempDirForImpersonatedOrCurrentUser();
+  }
+
+  ASSERT_FALSE(expected_path.IsEmpty());
+  EXPECT_STREQ(expected_path, cm_->GetTempDir());
+  EXPECT_TRUE(File::Exists(expected_path));
 }
 
 TEST_F(ConfigManagerNoOverrideTest, IsRunningFromMachineGoopdateInstallDir) {
@@ -567,6 +607,20 @@ TEST_P(ConfigManagerTest, GetUsageStatsReportUrl) {
   url.Empty();
   EXPECT_SUCCEEDED(cm_->GetUsageStatsReportUrl(&url));
   EXPECT_STREQ(url, _T("http://usagestatsreport/"));
+}
+
+// Tests the `GetAppLogoUrl` override.
+TEST_P(ConfigManagerTest, GetAppLogoUrl) {
+  CString url;
+  EXPECT_SUCCEEDED(cm_->GetAppLogoUrl(&url));
+  EXPECT_STREQ(url, kUrlAppLogo);
+
+  EXPECT_SUCCEEDED(RegKey::SetValue(MACHINE_REG_UPDATE_DEV,
+                                    kRegValueNameAppLogoUrl,
+                                    _T("http://applogo/")));
+  url.Empty();
+  EXPECT_SUCCEEDED(cm_->GetAppLogoUrl(&url));
+  EXPECT_STREQ(url, _T("http://applogo/"));
 }
 
 // Tests LastCheckPeriodSec override.
@@ -1226,15 +1280,54 @@ TEST_P(ConfigManagerTest, IsWindowsInstalling_Installing_Vista_ValidStates) {
   EXPECT_TRUE(cm_->IsWindowsInstalling());
 }
 
+TEST_P(ConfigManagerTest, GetForceInstallApps_NoGroupPolicy) {
+  std::vector<CString> app_ids;
+  EXPECT_EQ(IsDM() ? S_OK : E_FAIL, GetForceInstallApps(true, &app_ids));
+  EXPECT_EQ(IsDM() ? S_OK : E_FAIL, GetForceInstallApps(false, &app_ids));
+}
+
+TEST_P(ConfigManagerTest, GetForceInstallApps_GroupPolicy) {
+  if (!IsDomainPredominant()) {
+    return;
+  }
+
+  EXPECT_SUCCEEDED(SetPolicy(kInstallPolicyApp1, kPolicyForceInstallMachine));
+  EXPECT_SUCCEEDED(SetPolicy(kInstallPolicyApp2, kPolicyForceInstallUser));
+
+  std::vector<CString> app_ids_machine;
+  EXPECT_SUCCEEDED(GetForceInstallApps(true, &app_ids_machine));
+  EXPECT_EQ(1, app_ids_machine.size());
+
+  std::vector<CString> app_ids_user;
+  EXPECT_SUCCEEDED(GetForceInstallApps(false, &app_ids_user));
+  EXPECT_EQ(1, app_ids_user.size());
+}
+
+TEST_P(ConfigManagerTest, GetForceInstallApps_DMPolicy) {
+  if (!IsDM()) {
+    return;
+  }
+
+  std::vector<CString> app_ids_machine;
+  EXPECT_SUCCEEDED(GetForceInstallApps(true, &app_ids_machine));
+  EXPECT_EQ(1, app_ids_machine.size());
+
+  std::vector<CString> app_ids_user;
+  EXPECT_SUCCEEDED(GetForceInstallApps(false, &app_ids_user));
+  EXPECT_EQ(1, app_ids_user.size());
+}
+
 TEST_P(ConfigManagerTest, CanInstallApp_NoGroupPolicy) {
   EXPECT_TRUE(CanInstallApp(kAppGuid1, true));
-  EXPECT_EQ(kPolicyEnabled, GetEffectivePolicyForAppInstalls(kAppGuid1));
+  EXPECT_EQ(IsDM() ? kPolicyForceInstallMachine : kPolicyEnabled,
+            GetEffectivePolicyForAppInstalls(kAppGuid1));
 }
 
 TEST_P(ConfigManagerTest, CanInstallApp_DifferentAppDisabled) {
   EXPECT_SUCCEEDED(SetPolicy(kInstallPolicyApp2, 0));
   EXPECT_TRUE(CanInstallApp(kAppGuid1, true));
-  EXPECT_EQ(kPolicyEnabled, GetEffectivePolicyForAppInstalls(kAppGuid1));
+  EXPECT_EQ(IsDM() ? kPolicyForceInstallMachine : kPolicyEnabled,
+            GetEffectivePolicyForAppInstalls(kAppGuid1));
 }
 
 TEST_P(ConfigManagerTest, CanInstallApp_NoDefaultValue_AppDisabled) {
@@ -1247,7 +1340,9 @@ TEST_P(ConfigManagerTest, CanInstallApp_NoDefaultValue_AppDisabled) {
 TEST_P(ConfigManagerTest, CanInstallApp_NoDefaultValue_AppEnabled) {
   EXPECT_SUCCEEDED(SetPolicy(kInstallPolicyApp1, 1));
   EXPECT_TRUE(CanInstallApp(kAppGuid1, true));
-  EXPECT_EQ(kPolicyEnabled, GetEffectivePolicyForAppInstalls(kAppGuid1));
+  EXPECT_EQ(IsDomainPredominant() || !IsDM() ? kPolicyEnabled
+                                             : kPolicyForceInstallMachine,
+      GetEffectivePolicyForAppInstalls(kAppGuid1));
 }
 
 TEST_P(ConfigManagerTest, CanInstallApp_NoDefaultValue_AppInvalid) {
@@ -1275,7 +1370,9 @@ TEST_P(ConfigManagerTest, CanInstallApp_DefaultDisabled_AppEnabled) {
   EXPECT_SUCCEEDED(SetPolicy(_T("InstallDefault"), 0));
   EXPECT_SUCCEEDED(SetPolicy(kInstallPolicyApp1, 1));
   EXPECT_TRUE(CanInstallApp(kAppGuid1, true));
-  EXPECT_EQ(kPolicyEnabled, GetEffectivePolicyForAppInstalls(kAppGuid1));
+  EXPECT_EQ(IsDomainPredominant() || !IsDM() ? kPolicyEnabled
+                                             : kPolicyForceInstallMachine,
+      GetEffectivePolicyForAppInstalls(kAppGuid1));
 }
 
 // Invalid value defaulting to true overrides the InstallDefault disable.
@@ -1289,7 +1386,9 @@ TEST_P(ConfigManagerTest, CanInstallApp_DefaultDisabled_AppInvalid) {
 TEST_P(ConfigManagerTest, CanInstallApp_DefaultEnabled_NoAppValue) {
   EXPECT_SUCCEEDED(SetPolicy(_T("InstallDefault"), 1));
   EXPECT_TRUE(CanInstallApp(kAppGuid1, true));
-  EXPECT_EQ(kPolicyEnabled, GetEffectivePolicyForAppInstalls(kAppGuid1));
+  EXPECT_EQ(IsDomainPredominant() || !IsDM() ? kPolicyEnabled
+                                             : kPolicyForceInstallMachine,
+      GetEffectivePolicyForAppInstalls(kAppGuid1));
 }
 
 TEST_P(ConfigManagerTest, CanInstallApp_DefaultEnabled_AppDisabled) {
@@ -1305,7 +1404,9 @@ TEST_P(ConfigManagerTest, CanInstallApp_DefaultEnabled_AppEnabled) {
   EXPECT_SUCCEEDED(SetPolicy(kInstallPolicyApp1, 1));
   EXPECT_TRUE(CanInstallApp(kAppGuid1, true));
   EXPECT_TRUE(CanInstallApp(kAppGuid1, false));
-  EXPECT_EQ(kPolicyEnabled, GetEffectivePolicyForAppInstalls(kAppGuid1));
+  EXPECT_EQ(IsDomainPredominant() || !IsDM() ? kPolicyEnabled
+                                             : kPolicyForceInstallMachine,
+      GetEffectivePolicyForAppInstalls(kAppGuid1));
 }
 
 TEST_P(ConfigManagerTest, CanInstallApp_DefaultEnabled_AppInvalid) {
@@ -1830,6 +1931,14 @@ TEST_P(ConfigManagerTest, GetEffectivePolicyForAppUpdates_DMPolicy) {
             GetEffectivePolicyForAppUpdates(kChromeAppId));
 }
 
+TEST_P(ConfigManagerTest, GetTargetChannel) {
+  EXPECT_SUCCEEDED(SetPolicyString(_T("TargetChannel") CHROME_APP_ID,
+                   _T("beta")));
+  EXPECT_STREQ(IsDomainPredominant() ? _T("beta") : IsDM() ? _T("dev") :
+                                                             _T(""),
+               GetTargetChannel(kChromeAppId));
+}
+
 TEST_P(ConfigManagerTest, GetTargetVersionPrefix) {
   EXPECT_SUCCEEDED(SetPolicyString(_T("TargetVersionPrefix") CHROME_APP_ID,
                    _T("4.67.5")));
@@ -1854,42 +1963,86 @@ TEST_P(ConfigManagerTest, AreUpdatesSuppressedNow) {
   EXPECT_EQ(IsDomain() || IsDM(), AreUpdatesSuppressedNow());
 }
 
+TEST_P(ConfigManagerTest, AreUpdatesSuppressedNow_MultipleValues) {
+  const struct {
+    const DWORD suppress_start_hour;
+    const DWORD suppress_start_minute;
+    const DWORD suppress_duration_minutes;
+    const CTime now;
+    bool expect_updates_suppressed;
+  } test_cases[] = {
+      // Suppress starting 12:00 for 959 minutes. `now` is July 1, 2023, 01:15.
+      {12, 00, 959, {2023, 7, 01, 01, 15, 00}, IsDomainPredominant()},
+
+      // Suppress starting 12:00 for 959 minutes. `now` is July 1, 2023, 04:15.
+      {12, 00, 959, {2023, 7, 01, 04, 15, 00}, false},
+
+      // Suppress starting 00:00 for 959 minutes. `now` is July 1, 2023, 04:15.
+      {00, 00, 959, {2023, 7, 01, 04, 15, 00}, IsDomainPredominant()},
+
+      // Suppress starting 00:00 for 959 minutes. `now` is July 1, 2023, 16:15.
+      {00, 00, 959, {2023, 7, 01, 16, 15, 00}, false},
+
+      // Suppress starting 18:00 for 12 hours. `now` is July 1, 2023, 05:15.
+      {
+       18, 00, 12 * kMinPerHour,
+       {2023, 7, 01, 5, 15, 00},
+       IsDomainPredominant()
+      },
+
+      // Suppress starting 18:00 for 12 hours. `now` is July 1, 2023, 06:15.
+      {18, 00, 12 * kMinPerHour, {2023, 7, 01, 6, 15, 00}, false},
+  };
+
+  for (const auto& test_case : test_cases) {
+    EXPECT_SUCCEEDED(SetPolicy(kRegValueUpdatesSuppressedStartHour,
+                               test_case.suppress_start_hour));
+    EXPECT_SUCCEEDED(SetPolicy(kRegValueUpdatesSuppressedStartMin,
+                               test_case.suppress_start_minute));
+    EXPECT_SUCCEEDED(SetPolicy(kRegValueUpdatesSuppressedDurationMin,
+                               test_case.suppress_duration_minutes));
+    EXPECT_EQ(test_case.expect_updates_suppressed && (IsDomain() || IsDM()),
+              AreUpdatesSuppressedNow(test_case.now));
+  }
+}
+
 TEST_P(ConfigManagerTest, GetPackageCacheSizeLimitMBytes_Default) {
-  EXPECT_EQ(500, cm_->GetPackageCacheSizeLimitMBytes());
+  EXPECT_EQ(500, cm_->GetPackageCacheSizeLimitMBytes(NULL));
 }
 
 TEST_P(ConfigManagerTest, GetPackageCacheSizeLimitMBytes_Override_TooBig) {
   EXPECT_SUCCEEDED(SetPolicy(kRegValueCacheSizeLimitMBytes, 8192));
-  EXPECT_EQ(500, cm_->GetPackageCacheSizeLimitMBytes());
+  EXPECT_EQ(500, cm_->GetPackageCacheSizeLimitMBytes(NULL));
 }
 
 TEST_P(ConfigManagerTest, GetPackageCacheSizeLimitMBytes_Override_TooSmall) {
   EXPECT_SUCCEEDED(SetPolicy(kRegValueCacheSizeLimitMBytes, 0));
-  EXPECT_EQ(500, cm_->GetPackageCacheSizeLimitMBytes());
+  EXPECT_EQ(500, cm_->GetPackageCacheSizeLimitMBytes(NULL));
 }
 
 TEST_P(ConfigManagerTest, GetPackageCacheSizeLimitMBytes_Override_Valid) {
   EXPECT_SUCCEEDED(SetPolicy(kRegValueCacheSizeLimitMBytes, 250));
-  EXPECT_EQ(IsDomain() ? 250 : 500, cm_->GetPackageCacheSizeLimitMBytes());
+  EXPECT_EQ(IsDomain() ? 250 : 500, cm_->GetPackageCacheSizeLimitMBytes(NULL));
 }
 
 TEST_P(ConfigManagerTest, GetPackageCacheExpirationTimeDays_Default) {
-  EXPECT_EQ(180, cm_->GetPackageCacheExpirationTimeDays());
+  EXPECT_EQ(180, cm_->GetPackageCacheExpirationTimeDays(NULL));
 }
 
 TEST_P(ConfigManagerTest, GetPackageCacheExpirationTimeDays_Override_TooBig) {
   EXPECT_SUCCEEDED(SetPolicy(kRegValueCacheLifeLimitDays, 3600));
-  EXPECT_EQ(180, cm_->GetPackageCacheExpirationTimeDays());
+  EXPECT_EQ(180, cm_->GetPackageCacheExpirationTimeDays(NULL));
 }
 
 TEST_P(ConfigManagerTest, GetPackageCacheExpirationTimeDays_Override_TooSmall) {
   EXPECT_SUCCEEDED(SetPolicy(kRegValueCacheLifeLimitDays, 0));
-  EXPECT_EQ(180, cm_->GetPackageCacheExpirationTimeDays());
+  EXPECT_EQ(180, cm_->GetPackageCacheExpirationTimeDays(NULL));
 }
 
 TEST_P(ConfigManagerTest, GetPackageCacheExpirationTimeDays_Override_Valid) {
   EXPECT_SUCCEEDED(SetPolicy(kRegValueCacheLifeLimitDays, 60));
-  EXPECT_EQ(IsDomain() ? 60 : 180, cm_->GetPackageCacheExpirationTimeDays());
+  EXPECT_EQ(IsDomain() ? 60 : 180,
+            cm_->GetPackageCacheExpirationTimeDays(NULL));
 }
 
 TEST_P(ConfigManagerTest, LastCheckedTime) {
@@ -2158,20 +2311,18 @@ TEST_P(ConfigManagerTest, GetAutoUpdateJitterMs) {
 }
 
 TEST_P(ConfigManagerTest, GetDownloadPreferenceGroupPolicy) {
-  EXPECT_STREQ(!IsDomainPredominant() && IsDM() ? kDownloadPreferenceCacheable :
-                                                  _T(""),
-               cm_->GetDownloadPreferenceGroupPolicy());
+  EXPECT_STREQ(IsDM() ? kDownloadPreferenceCacheable : _T(""),
+               cm_->GetDownloadPreferenceGroupPolicy(NULL));
 
   EXPECT_SUCCEEDED(SetPolicyString(kRegValueDownloadPreference,
                                    _T("unknown")));
-  EXPECT_STREQ(!IsDomainPredominant() && IsDM() ? kDownloadPreferenceCacheable :
-                                                  _T(""),
-               cm_->GetDownloadPreferenceGroupPolicy());
+  EXPECT_STREQ(IsDM() ? kDownloadPreferenceCacheable : _T(""),
+               cm_->GetDownloadPreferenceGroupPolicy(NULL));
 
   EXPECT_SUCCEEDED(SetPolicyString(kRegValueDownloadPreference,
                                    kDownloadPreferenceCacheable));
   EXPECT_STREQ(IsDomain() || IsDM() ? kDownloadPreferenceCacheable : _T(""),
-               cm_->GetDownloadPreferenceGroupPolicy());
+               cm_->GetDownloadPreferenceGroupPolicy(NULL));
 }
 
 #if defined(HAS_DEVICE_MANAGEMENT)

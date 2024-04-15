@@ -54,25 +54,23 @@ namespace omaha {
 namespace {
 
 const TCHAR kAppId[] = _T("{B18BC01B-E0BD-4BF0-A33E-1133055E5FDE}");
-const GUID kAppGuid = {0xB18BC01B, 0xE0BD, 0x4BF0,
-                       {0xA3, 0x3E, 0x11, 0x33, 0x05, 0x5E, 0x5F, 0xDE}};
 const TCHAR kApp2Id[] = _T("{85794B39-42E5-457c-B567-4A0F2A0FB272}");
 
 const TCHAR kFullAppClientsKeyPath[] =
-    _T("HKCU\\Software\\") SHORT_COMPANY_NAME _T("\\") PRODUCT_NAME
+    _T("HKCU\\Software\\") PATH_COMPANY_NAME _T("\\") PRODUCT_NAME
     _T("\\Clients\\{B18BC01B-E0BD-4BF0-A33E-1133055E5FDE}");
 const TCHAR kFullAppClientStateKeyPath[] =
-    _T("HKCU\\Software\\") SHORT_COMPANY_NAME _T("\\") PRODUCT_NAME
+    _T("HKCU\\Software\\") PATH_COMPANY_NAME _T("\\") PRODUCT_NAME
     _T("\\ClientState\\{B18BC01B-E0BD-4BF0-A33E-1133055E5FDE}");
 const TCHAR kFullFooAppClientKeyPath[] =
-    _T("HKLM\\Software\\") SHORT_COMPANY_NAME _T("\\") PRODUCT_NAME
+    _T("HKLM\\Software\\") PATH_COMPANY_NAME _T("\\") PRODUCT_NAME
     _T("\\Clients\\{D6B08267-B440-4C85-9F79-E195E80D9937}");
 const TCHAR kFullFooAppClientStateKeyPath[] =
-    _T("HKLM\\Software\\") SHORT_COMPANY_NAME _T("\\") PRODUCT_NAME
+    _T("HKLM\\Software\\") PATH_COMPANY_NAME _T("\\") PRODUCT_NAME
     _T("\\ClientState\\{D6B08267-B440-4C85-9F79-E195E80D9937}");
 
 const TCHAR kFullApp2ClientsKeyPath[] =
-    _T("HKCU\\Software\\") SHORT_COMPANY_NAME _T("\\") PRODUCT_NAME
+    _T("HKCU\\Software\\") PATH_COMPANY_NAME _T("\\") PRODUCT_NAME
     _T("\\Clients\\{85794B39-42E5-457c-B567-4A0F2A0FB272}");
 
 const TCHAR kSetupFooV1RelativeLocation[] =
@@ -115,7 +113,7 @@ class InstallManagerTest : public testing::TestWithParam<bool> {
   virtual void SetUp() {}
   virtual void TearDown() {}
 
-  const bool IsMachine() const {
+  bool IsMachine() const {
     return GetParam();
   }
 
@@ -440,7 +438,7 @@ TEST_F(InstallManagerInstallAppUserTest,
   EXPECT_EQ(POST_INSTALL_ACTION_DEFAULT, GetPostInstallAction(app_));
 }
 
-TEST_F(InstallManagerInstallAppUserTest, InstallApp_InstallerEmtpyFilename) {
+TEST_F(InstallManagerInstallAppUserTest, InstallApp_InstallerEmptyFilename) {
   // Package asserts that the filename and file path are not NULL.
   ExpectAsserts expect_asserts;
 
@@ -1253,6 +1251,8 @@ TEST_P(InstallManagerTest, InstallDir_ReadOnlyFiles) {
 
   FakeGLock fake_glock;
   InstallManager install_manager(&fake_glock, IsMachine());
+
+  ::Sleep(10);
 
   EXPECT_TRUE(File::Exists(install_dir));
   EXPECT_TRUE(::PathIsDirectoryEmpty(install_dir));

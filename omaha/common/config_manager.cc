@@ -30,6 +30,7 @@
 #include "omaha/base/const_addresses.h"
 #include "omaha/base/debug.h"
 #include "omaha/base/error.h"
+#include "omaha/base/file.h"
 #include "omaha/base/logging.h"
 #include "omaha/base/scope_guard.h"
 #include "omaha/base/string.h"
@@ -40,335 +41,408 @@
 #include "omaha/common/const_goopdate.h"
 #include "omaha/common/crash_utils.h"
 #include "omaha/common/oem_install_utils.h"
+#include "omaha/goopdate/policy_status_value.h"
 #include "omaha/statsreport/metrics.h"
 
 namespace omaha {
 
 namespace {
 
-int MapCSIDLFor64Bit(int csidl) {
-  // We assume, for now, that Omaha will always be deployed in a 32-bit form.
-  // If any 64-bit components (such as the crash handler) need to query paths,
-  // they need to be directed to the 32-bit equivalents.
+// This class aggregates a source/value pair for a single policy value, as well
+// as a conflict-source/conflict-value pair if a conflict exists.
+template <typename T>
+class PolicyValue {
+ public:
+  PolicyValue() : has_conflict_(false) {}
 
-  switch (csidl) {
-    case CSIDL_PROGRAM_FILES:
-      return CSIDL_PROGRAM_FILESX86;
-    case CSIDL_PROGRAM_FILES_COMMON:
-      return CSIDL_PROGRAM_FILES_COMMONX86;
-    case CSIDL_SYSTEM:
-      return CSIDL_SYSTEMX86;
-    default:
-      return csidl;
+  // The update method is called multiple times, once for each policy source.
+  // The values are stored in the order in which the Update() method is called,
+  // and |is_managed| sources have precedence.
+  void Update(bool is_managed, const CString& source, const T& value) {
+    if (is_managed && source_.IsEmpty()) {
+      source_ = source;
+      value_ = value;
+    } else if (conflict_source_.IsEmpty()) {
+      conflict_source_ = source;
+      conflict_value_ = value;
+      has_conflict_ = !!GetValueString().Compare(GetConflictValueString());
+    }
+  }
+
+  // This method is called once at the conclusion of updates to a policy value,
+  // with a local (machine) source and value.
+  // This method constructs and returns a IPolicyStatusValue using the final
+  // aggregation of the PolicyValue, if the optional |policy_status_value| is
+  // provided.
+  void UpdateFinal(const T& value, IPolicyStatusValue** policy_status_value) {
+    if (source_.IsEmpty()) {
+      source_ = _T("Default");
+      value_ = value;
+    }
+
+    if (policy_status_value) {
+      VERIFY1(SUCCEEDED(PolicyStatusValue::Create(source_,
+                                                  GetValueString(),
+                                                  has_conflict_,
+                                                  conflict_source_,
+                                                  GetConflictValueString(),
+                                                  policy_status_value)));
+    }
+  }
+
+  CString ToString() const {
+    CString result(_T("[PolicyValue]"));
+    SafeCStringAppendFormat(&result, _T("[source_][%s]"), source_);
+    SafeCStringAppendFormat(&result, _T("[value_][%s]"), GetValueString());
+
+    if (has_conflict_) {
+      SafeCStringAppendFormat(&result, _T("[conflict_source_][%s]"),
+                                       conflict_source_);
+      SafeCStringAppendFormat(&result, _T("[conflict_value_][%s]"),
+                                       GetConflictValueString());
+    }
+
+    return result;
+  }
+
+  CString source() const { return source_; }
+  T value() const { return value_; }
+
+  // These are the values used in the PolicyStatusValue COM object creation.
+  // These values do not necessarily correspond to value() and conflict_value().
+  CString GetValueString() const { return value_; }
+  CString GetConflictValueString() const { return conflict_value_; }
+
+ private:
+  CString source_;
+  T value_;
+  bool has_conflict_;
+  CString conflict_source_;
+  T conflict_value_;
+
+  DISALLOW_COPY_AND_ASSIGN(PolicyValue);
+};
+
+template <>
+CString PolicyValue<DWORD>::GetValueString() const {
+  return itostr(static_cast<uint32>(value_));
+}
+
+template <>
+CString PolicyValue<DWORD>::GetConflictValueString() const {
+  return itostr(static_cast<uint32>(conflict_value_));
+}
+
+template <>
+CString PolicyValue<bool>::GetValueString() const {
+  return String_BoolToString(value_);
+}
+
+template <>
+CString PolicyValue<bool>::GetConflictValueString() const {
+  return String_BoolToString(conflict_value_);
+}
+
+template <>
+CString PolicyValue<std::vector<CString>>::GetValueString() const {
+  if (value_.empty()) {
+    return CString();
+  }
+
+  CString result;
+  for (const auto& app_id : value_) {
+    result += app_id;
+    result += ";";
+  }
+  result.Delete(result.GetLength() - 1);
+
+  return result;
+}
+
+template <>
+CString PolicyValue<std::vector<CString>>::GetConflictValueString() const {
+  if (conflict_value_.empty()) {
+    return CString();
+  }
+
+  CString result;
+  for (const auto& app_id : conflict_value_) {
+    result += app_id;
+    result += ";";
+  }
+  result.Delete(result.GetLength() - 1);
+
+  return result;
+}
+
+template <>
+CString PolicyValue<UpdatesSuppressedTimes>::GetValueString() const {
+  CString result;
+  SafeCStringFormat(&result, _T("%d, %d, %d"), value_.start_hour,
+                                               value_.start_min,
+                                               value_.duration_min);
+  return result;
+}
+
+template <>
+CString PolicyValue<UpdatesSuppressedTimes>::GetConflictValueString() const {
+  CString result;
+  SafeCStringFormat(&result, _T("%d, %d, %d"), conflict_value_.start_hour,
+                                               conflict_value_.start_min,
+                                               conflict_value_.duration_min);
+  return result;
+}
+
+struct SecondsMinutes {
+  DWORD seconds = 0;
+};
+
+// These methods return the string value in minutes. This is because the
+// LastCheckPeriodMinutes policy is in minutes, and therefore the external
+// interface returns values in minutes.
+template <>
+CString PolicyValue<SecondsMinutes>::GetValueString() const {
+  return itostr(static_cast<uint32>(value_.seconds / 60));
+}
+
+template <>
+CString PolicyValue<SecondsMinutes>::GetConflictValueString() const {
+  return itostr(static_cast<uint32>(conflict_value_.seconds / 60));
+}
+
+template <typename T>
+void GetPolicyDword(const TCHAR* policy_name, T* out) {
+  ASSERT1(out);
+
+  DWORD value = 0;
+  if (SUCCEEDED(
+          RegKey::GetValue(kRegKeyGoopdateGroupPolicy, policy_name, &value))) {
+    *out = static_cast<T>(value);
   }
 }
 
-// GetDir32 is named as such because it will always look for 32-bit versions
-// of directories; i.e. on a 64-bit OS, CSIDL_PROGRAM_FILES will return
-// Program Files (x86).  If we need to genuinely find 64-bit locations on
-// 64-bit code in the future, we need to add a GetDir64() which omits the call
-// to MapCSIDLFor64Bit().
-HRESULT GetDir32(int csidl,
-                 const CString& path_tail,
-                 bool create_dir,
-                 CString* dir) {
-  ASSERT1(dir);
+void GetPolicyString(const TCHAR* policy_name, CString* out) {
+  ASSERT1(out);
 
-#ifdef _WIN64
-  csidl = MapCSIDLFor64Bit(csidl);
-#endif
-
-  CString path;
-  HRESULT hr = GetFolderPath(csidl | CSIDL_FLAG_DONT_VERIFY, &path);
-  if (FAILED(hr)) {
-    CORE_LOG(LW, (_T("GetDir failed to find path][%d][0x%08x]"), csidl, hr));
-    return hr;
+  CString value;
+  if (SUCCEEDED(
+          RegKey::GetValue(kRegKeyGoopdateGroupPolicy, policy_name, &value))) {
+    *out = value;
   }
-  if (!::PathAppend(CStrBuf(path, MAX_PATH), path_tail)) {
-    CORE_LOG(LW, (_T("GetDir failed to append path][%s][%s]"),
-        path, path_tail));
-    return GOOPDATE_E_PATH_APPEND_FAILED;
-  }
-  dir->SetString(path);
-
-  // Try to create the directory. Continue if the directory can't be created.
-  if (create_dir) {
-    hr = CreateDir(path, NULL);
-    if (FAILED(hr)) {
-      CORE_LOG(LW, (_T("[GetDir failed to create dir][%s][0x%08x]"), path, hr));
-    }
-  }
-  return S_OK;
 }
 
 }  // namespace
 
-bool GroupPolicyManager::IsManaged() {
-  return IsEnrolledToDomain() && RegKey::HasKey(kRegKeyGoopdateGroupPolicy);
+bool OmahaPolicyManager::IsManaged() {
+  OPT_LOG(L1, (_T("[IsManaged][%s][%d]"), source(), policy_.is_managed));
+  return policy_.is_managed;
 }
 
-HRESULT GroupPolicyManager::GetLastCheckPeriodMinutes(DWORD* minutes) {
-  if (!IsManaged()) {
+HRESULT OmahaPolicyManager::GetLastCheckPeriodMinutes(DWORD* minutes) {
+  if (!policy_.is_initialized) {
     return E_FAIL;
   }
 
-  HRESULT hr = RegKey::GetValue(kRegKeyGoopdateGroupPolicy,
-                                kRegValueAutoUpdateCheckPeriodOverrideMinutes,
-                                minutes);
-  if (FAILED(hr)) {
-    return hr;
+  if (policy_.auto_update_check_period_minutes == -1) {
+    return E_FAIL;
   }
 
-  OPT_LOG(L5, (_T("[Group Policy check period override %d]"), *minutes));
+  *minutes = static_cast<DWORD>(policy_.auto_update_check_period_minutes);
+  OPT_LOG(L5, (_T("[GetLastCheckPeriodMinutes][%s][%d]"), source(), *minutes));
   return S_OK;
 }
 
-HRESULT GroupPolicyManager::GetUpdatesSuppressedTimes(DWORD* start_hour,
-                                                      DWORD* start_min,
-                                                      DWORD* duration_min) {
-  if (!IsManaged()) {
+HRESULT OmahaPolicyManager::GetUpdatesSuppressedTimes(
+    UpdatesSuppressedTimes* times) {
+  if (!policy_.is_initialized) {
     return E_FAIL;
   }
 
-  HRESULT hr = RegKey::GetValue(kRegKeyGoopdateGroupPolicy,
-                                kRegValueUpdatesSuppressedStartHour,
-                                start_hour);
-  if (FAILED(hr)) {
-    return hr;
+  if (policy_.updates_suppressed.start_hour == -1 ||
+      policy_.updates_suppressed.start_minute == -1 ||
+      policy_.updates_suppressed.duration_min == -1) {
+    OPT_LOG(L5,
+            (_T("[GetUpdatesSuppressedTimes][%s][Missing time]"), source()));
+    return E_FAIL;
   }
 
-  hr = RegKey::GetValue(kRegKeyGoopdateGroupPolicy,
-                        kRegValueUpdatesSuppressedStartMin,
-                        start_min);
-  if (FAILED(hr)) {
-    return hr;
-  }
-
-  hr = RegKey::GetValue(kRegKeyGoopdateGroupPolicy,
-                        kRegValueUpdatesSuppressedDurationMin,
-                        duration_min);
-  if (FAILED(hr)) {
-    return hr;
-  }
+  times->start_hour = static_cast<DWORD>(policy_.updates_suppressed.start_hour);
+  times->start_min =
+      static_cast<DWORD>(policy_.updates_suppressed.start_minute);
+  times->duration_min =
+      static_cast<DWORD>(policy_.updates_suppressed.duration_min);
 
   return S_OK;
 }
 
-HRESULT GroupPolicyManager::GetDownloadPreferenceGroupPolicy(
+HRESULT OmahaPolicyManager::GetDownloadPreferenceGroupPolicy(
     CString* download_preference) {
-  if (!IsManaged()) {
+  if (!policy_.is_initialized || policy_.download_preference.IsEmpty()) {
     return E_FAIL;
   }
 
-  return RegKey::GetValue(kRegKeyGoopdateGroupPolicy,
-                          kRegValueDownloadPreference,
-                          download_preference);
+  *download_preference = policy_.download_preference;
+  return S_OK;
 }
 
-HRESULT GroupPolicyManager::GetPackageCacheSizeLimitMBytes(
+HRESULT OmahaPolicyManager::GetPackageCacheSizeLimitMBytes(
     DWORD* cache_size_limit) {
-  if (!IsManaged()) {
+  if (!policy_.is_initialized || policy_.cache_size_limit == -1) {
     return E_FAIL;
   }
 
-  return RegKey::GetValue(kRegKeyGoopdateGroupPolicy,
-                          kRegValueCacheSizeLimitMBytes,
-                          cache_size_limit);
+  *cache_size_limit = static_cast<DWORD>(policy_.cache_size_limit);
+  return S_OK;
 }
 
-HRESULT GroupPolicyManager::GetPackageCacheExpirationTimeDays(
+HRESULT OmahaPolicyManager::GetPackageCacheExpirationTimeDays(
     DWORD* cache_life_limit) {
-  if (!IsManaged()) {
+  if (!policy_.is_initialized || policy_.cache_life_limit == -1) {
     return E_FAIL;
   }
 
-  return RegKey::GetValue(kRegKeyGoopdateGroupPolicy,
-                          kRegValueCacheLifeLimitDays,
-                          cache_life_limit);
-}
-
-HRESULT GroupPolicyManager::GetEffectivePolicyForAppInstalls(
-    const GUID& app_guid,
-    DWORD* install_policy) {
-  if (!IsManaged()) {
-    return E_FAIL;
-  }
-
-  CString app_value_name(kRegValueInstallAppPrefix);
-  app_value_name.Append(GuidToString(app_guid));
-  HRESULT hr = RegKey::GetValue(kRegKeyGoopdateGroupPolicy,
-                                app_value_name,
-                                install_policy);
-
-  return SUCCEEDED(hr) ? hr : RegKey::GetValue(kRegKeyGoopdateGroupPolicy,
-                                               kRegValueInstallAppsDefault,
-                                               install_policy);
-}
-
-HRESULT GroupPolicyManager::GetEffectivePolicyForAppUpdates(
-    const GUID& app_guid,
-    DWORD* update_policy) {
-  if (!IsManaged()) {
-    return E_FAIL;
-  }
-
-  CString app_value_name(kRegValueUpdateAppPrefix);
-  app_value_name.Append(GuidToString(app_guid));
-  HRESULT hr = RegKey::GetValue(kRegKeyGoopdateGroupPolicy,
-                                app_value_name,
-                                update_policy);
-
-  return SUCCEEDED(hr) ? hr : RegKey::GetValue(kRegKeyGoopdateGroupPolicy,
-                                               kRegValueUpdateAppsDefault,
-                                               update_policy);
-}
-
-HRESULT GroupPolicyManager::GetTargetVersionPrefix(
-    const GUID& app_guid,
-    CString* target_version_prefix) {
-  if (!IsManaged()) {
-    return E_FAIL;
-  }
-
-  CString app_value_name(kRegValueTargetVersionPrefix);
-  app_value_name.Append(GuidToString(app_guid));
-  return RegKey::GetValue(kRegKeyGoopdateGroupPolicy,
-                          app_value_name,
-                          target_version_prefix);
-}
-
-HRESULT GroupPolicyManager::IsRollbackToTargetVersionAllowed(
-    const GUID& app_guid,
-    bool* rollback_allowed) {
-  if (!IsManaged()) {
-    return E_FAIL;
-  }
-
-  CString app_value_name(kRegValueRollbackToTargetVersion);
-  app_value_name.Append(GuidToString(app_guid));
-  DWORD is_rollback_allowed = 0;
-  HRESULT hr = RegKey::GetValue(kRegKeyGoopdateGroupPolicy,
-                                app_value_name,
-                                &is_rollback_allowed);
-  if (SUCCEEDED(hr)) {
-    *rollback_allowed = !!is_rollback_allowed;
-  }
-
-  return hr;
-}
-
-bool DMPolicyManager::IsManaged() {
-  return dm_policy_.is_initialized;
-}
-
-HRESULT DMPolicyManager::GetLastCheckPeriodMinutes(DWORD* minutes) {
-  if (!IsManaged()) {
-    return E_FAIL;
-  }
-
-  if (dm_policy_.auto_update_check_period_minutes == -1) {
-    return E_FAIL;
-  }
-
-  *minutes = static_cast<DWORD>(dm_policy_.auto_update_check_period_minutes);
-  REPORT_LOG(L5, (_T("[DM Policy check period override %d]"), *minutes));
+  *cache_life_limit = static_cast<DWORD>(policy_.cache_life_limit);
   return S_OK;
 }
 
-HRESULT DMPolicyManager::GetUpdatesSuppressedTimes(DWORD* start_hour,
-                                                   DWORD* start_min,
-                                                   DWORD* duration_min) {
-  if (!IsManaged()) {
+HRESULT OmahaPolicyManager::GetProxyMode(CString* proxy_mode) {
+  if (!policy_.is_initialized || policy_.proxy_mode.IsEmpty()) {
     return E_FAIL;
   }
 
-  if (dm_policy_.updates_suppressed.start_hour == -1 ||
-      dm_policy_.updates_suppressed.start_minute == -1 ||
-      dm_policy_.updates_suppressed.duration_min == -1) {
-    OPT_LOG(L5, (_T("[GetUpdatesSuppressedTimes][Missing DM time]")));
-    return E_FAIL;
-  }
-
-  *start_hour = static_cast<DWORD>(dm_policy_.updates_suppressed.start_hour);
-  *start_min = static_cast<DWORD>(dm_policy_.updates_suppressed.start_minute);
-  *duration_min =
-      static_cast<DWORD>(dm_policy_.updates_suppressed.duration_min);
-
+  *proxy_mode = policy_.proxy_mode;
   return S_OK;
 }
 
-HRESULT DMPolicyManager::GetDownloadPreferenceGroupPolicy(
-    CString* download_preference) {
-  if (!IsManaged()) {
+HRESULT OmahaPolicyManager::GetProxyPacUrl(CString* proxy_pac_url) {
+  if (!policy_.is_initialized ||
+      policy_.proxy_mode.CompareNoCase(kProxyModePacScript) != 0 ||
+      policy_.proxy_pac_url.IsEmpty()) {
     return E_FAIL;
   }
 
-  *download_preference = dm_policy_.download_preference;
+  *proxy_pac_url = policy_.proxy_pac_url;
   return S_OK;
 }
 
-HRESULT DMPolicyManager::GetPackageCacheSizeLimitMBytes(
-    DWORD* cache_size_limit) {
-  UNREFERENCED_PARAMETER(cache_size_limit);
-  return E_FAIL;
-}
-
-HRESULT DMPolicyManager::GetPackageCacheExpirationTimeDays(
-    DWORD* cache_life_limit) {
-  UNREFERENCED_PARAMETER(cache_life_limit);
-  return E_FAIL;
-}
-
-HRESULT DMPolicyManager::GetEffectivePolicyForAppInstalls(
-    const GUID& app_guid,
-    DWORD* install_policy) {
-  if (!IsManaged()) {
+HRESULT OmahaPolicyManager::GetProxyServer(CString* proxy_server) {
+  if (!policy_.is_initialized ||
+      policy_.proxy_mode.CompareNoCase(kProxyModeFixedServers) != 0 ||
+      policy_.proxy_server.IsEmpty()) {
     return E_FAIL;
   }
 
-  *install_policy = dm_policy_.application_settings.count(app_guid) > 0 ?
-      dm_policy_.application_settings.at(app_guid).install :
-      dm_policy_.install_default;
+  *proxy_server = policy_.proxy_server;
   return S_OK;
 }
 
-HRESULT DMPolicyManager::GetEffectivePolicyForAppUpdates(const GUID& app_guid,
-                                                         DWORD* update_policy) {
-  if (!IsManaged()) {
+HRESULT OmahaPolicyManager::GetForceInstallApps(bool is_machine,
+                                                std::vector<CString>* app_ids) {
+  ASSERT1(app_ids);
+  ASSERT1(app_ids->empty());
+
+  if (!policy_.is_initialized) {
     return E_FAIL;
   }
 
-  *update_policy = dm_policy_.application_settings.count(app_guid) ?
-      dm_policy_.application_settings.at(app_guid).update :
-      dm_policy_.update_default;
+  for (const auto& app_settings : policy_.application_settings) {
+    const DWORD expected = is_machine ? kPolicyForceInstallMachine :
+                                        kPolicyForceInstallUser;
+    if (static_cast<DWORD>(app_settings.second.install) != expected) {
+      continue;
+    }
+
+    CString app_id_string = GuidToString(app_settings.first);
+    app_ids->push_back(app_id_string);
+  }
+
+  return !app_ids->empty() ? S_OK : E_FAIL;
+}
+
+HRESULT OmahaPolicyManager::GetEffectivePolicyForAppInstalls(
+    const GUID& app_guid, DWORD* install_policy) {
+  if (!policy_.is_initialized) {
+    return E_FAIL;
+  }
+
+  if (policy_.application_settings.count(app_guid) &&
+      policy_.application_settings.at(app_guid).install != -1) {
+    *install_policy = policy_.application_settings.at(app_guid).install;
+    return S_OK;
+  }
+
+  if (policy_.install_default == -1) {
+    return E_FAIL;
+  }
+
+  *install_policy = policy_.install_default;
   return S_OK;
 }
 
-HRESULT DMPolicyManager::GetTargetVersionPrefix(
-    const GUID& app_guid,
-    CString* target_version_prefix) {
-  if (!IsManaged()) {
+HRESULT OmahaPolicyManager::GetEffectivePolicyForAppUpdates(
+    const GUID& app_guid, DWORD* update_policy) {
+  if (!policy_.is_initialized) {
+    return E_FAIL;
+  }
+
+  if (policy_.application_settings.count(app_guid) &&
+      policy_.application_settings.at(app_guid).update != -1) {
+    *update_policy = policy_.application_settings.at(app_guid).update;
+    return S_OK;
+  }
+
+  if (policy_.update_default == -1) {
+    return E_FAIL;
+  }
+
+  *update_policy = policy_.update_default;
+  return S_OK;
+}
+
+HRESULT OmahaPolicyManager::GetTargetChannel(const GUID& app_guid,
+                                             CString* target_channel) {
+  if (!policy_.is_initialized ||
+      !policy_.application_settings.count(app_guid) ||
+      policy_.application_settings.at(app_guid).target_channel.IsEmpty()) {
+    return E_FAIL;
+  }
+
+  *target_channel = policy_.application_settings.at(app_guid).target_channel;
+  return S_OK;
+}
+
+HRESULT OmahaPolicyManager::GetTargetVersionPrefix(
+    const GUID& app_guid, CString* target_version_prefix) {
+  if (!policy_.is_initialized ||
+      !policy_.application_settings.count(app_guid) ||
+      policy_.application_settings.at(app_guid)
+          .target_version_prefix.IsEmpty()) {
     return E_FAIL;
   }
 
   *target_version_prefix =
-      dm_policy_.application_settings.count(app_guid) ?
-      dm_policy_.application_settings.at(app_guid).target_version_prefix :
-      CString();
+      policy_.application_settings.at(app_guid).target_version_prefix;
   return S_OK;
 }
 
-HRESULT DMPolicyManager::IsRollbackToTargetVersionAllowed(
-    const GUID& app_guid,
-    bool* rollback_allowed) {
-  if (!IsManaged()) {
+HRESULT OmahaPolicyManager::IsRollbackToTargetVersionAllowed(
+    const GUID& app_guid, bool* rollback_allowed) {
+  if (!policy_.is_initialized ||
+      !policy_.application_settings.count(app_guid) ||
+      policy_.application_settings.at(app_guid).rollback_to_target_version ==
+          -1) {
     return E_FAIL;
   }
 
-  *rollback_allowed = dm_policy_.application_settings.count(app_guid) ?
-      dm_policy_.application_settings.at(app_guid).rollback_to_target_version :
-      false;
+  *rollback_allowed =
+      !!policy_.application_settings.at(app_guid).rollback_to_target_version;
   return S_OK;
+}
+
+void OmahaPolicyManager::set_policy(const CachedOmahaPolicy& policy) {
+  OPT_LOG(L1, (_T("[OmahaPolicyManager::set_policy][%s][%s]"), source(),
+               policy.ToString()));
+  policy_ = policy;
 }
 
 LLock ConfigManager::lock_;
@@ -387,7 +461,10 @@ void ConfigManager::DeleteInstance() {
   config_manager_ = NULL;
 }
 
-ConfigManager::ConfigManager() : dm_policy_manager_(new DMPolicyManager) {
+ConfigManager::ConfigManager()
+    : group_policy_manager_(new OmahaPolicyManager(_T("Group Policy"))),
+      dm_policy_manager_(new OmahaPolicyManager(_T("Device Management"))),
+      are_cloud_policies_preferred_(false) {
   CString current_module_directory(app_util::GetCurrentModuleDirectory());
 
   CString path;
@@ -415,17 +492,12 @@ ConfigManager::ConfigManager() : dm_policy_manager_(new DMPolicyManager) {
                                       true) == 0) :
                       false;
 
-  DWORD cloud_policy_preferred(0);
-  if (SUCCEEDED(RegKey::GetValue(kRegKeyGoopdateGroupPolicy,
-                                 kRegValueCloudPolicyOverridesPlatformPolicy,
-                                 &cloud_policy_preferred)) &&
-      cloud_policy_preferred) {
-    policies_.push_back(dm_policy_manager_);
-    policies_.emplace_back(new GroupPolicyManager);
-  } else {
-    policies_.emplace_back(new GroupPolicyManager);
-    policies_.push_back(dm_policy_manager_);
-  }
+  // We initialize the policy managers without taking the Group Policy critical
+  // section. Later, once we know the exact scenario that we are operating
+  // under, we may reload the policies with the critical section lock. At the
+  // moment, we reload the policies with the critical section lock for all User
+  // installs and updates, as well as all Machine updates.
+  VERIFY1(SUCCEEDED(LoadPolicies(false)));
 }
 
 CString ConfigManager::GetUserDownloadStorageDir() const {
@@ -478,21 +550,11 @@ bool ConfigManager::IsRunningFromUserGoopdateInstallDir() const {
 }
 
 CString ConfigManager::GetUserCrashReportsDir() const {
-  CString path;
-  VERIFY_SUCCEEDED(GetDir32(CSIDL_LOCAL_APPDATA,
-                             CString(OMAHA_REL_CRASH_DIR),
-                             true,
-                             &path));
-  return path;
+  return app_util::GetTempDir();
 }
 
 CString ConfigManager::GetMachineCrashReportsDir() const {
-  CString path;
-  VERIFY_SUCCEEDED(GetDir32(CSIDL_PROGRAM_FILES,
-                             CString(OMAHA_REL_CRASH_DIR),
-                             true,
-                             &path));
-  return path;
+  return GetSecureSystemTempDir();
 }
 
 CString ConfigManager::GetMachineSecureDownloadStorageDir() const {
@@ -524,7 +586,10 @@ CString ConfigManager::GetMachineSecureOfflineStorageDir() const {
 
 CString ConfigManager::GetTempDownloadDir() const {
   CString temp_download_dir(app_util::GetTempDirForImpersonatedOrCurrentUser());
-  ASSERT1(temp_download_dir);
+  if (temp_download_dir.IsEmpty()) {
+    return temp_download_dir;
+  }
+
   HRESULT hr = CreateDir(temp_download_dir, NULL);
   if (FAILED(hr)) {
     CORE_LOG(LW, (_T("[CreateDir failed][%s][0x%08x]"),
@@ -533,49 +598,178 @@ CString ConfigManager::GetTempDownloadDir() const {
   return temp_download_dir;
 }
 
-int ConfigManager::GetPackageCacheSizeLimitMBytes() const {
+int ConfigManager::GetPackageCacheSizeLimitMBytes(
+    IPolicyStatusValue** policy_status_value) const {
   DWORD kDefaultCacheStorageLimit = 500;  // 500 MB
   DWORD kMaxCacheStorageLimit = 5000;     // 5 GB
 
-  if (!IsEnrolledToDomain()) {
-    OPT_LOG(L5, (_T("[GetPackageCacheSizeLimitMBytes][Ignoring group policy]")
-                 _T("[machine is not part of a domain]")));
-    return kDefaultCacheStorageLimit;
+  PolicyValue<DWORD> v;
+
+  for (size_t i = 0; i != policies_.size(); ++i) {
+    DWORD cache_size_limit = 0;
+    HRESULT hr = policies_[i]->GetPackageCacheSizeLimitMBytes(
+        &cache_size_limit);
+
+    if (SUCCEEDED(hr)) {
+      if (cache_size_limit <= kMaxCacheStorageLimit && cache_size_limit > 0) {
+        v.Update(policies_[i]->IsManaged(),
+                 policies_[i]->source(),
+                 cache_size_limit);
+      }
+    }
   }
 
-  DWORD cache_size_limit = 0;
-  if (FAILED(RegKey::GetValue(kRegKeyGoopdateGroupPolicy,
-                              kRegValueCacheSizeLimitMBytes,
-                              &cache_size_limit)) ||
-      cache_size_limit > kMaxCacheStorageLimit ||
-      cache_size_limit == 0) {
-    cache_size_limit = kDefaultCacheStorageLimit;
-  }
+  v.UpdateFinal(kDefaultCacheStorageLimit, policy_status_value);
 
-  return static_cast<int>(cache_size_limit);
+  OPT_LOG(L5, (_T("[GetPackageCacheSizeLimitMBytes][%s]"), v.ToString()));
+
+  return v.value();
 }
 
-int ConfigManager::GetPackageCacheExpirationTimeDays() const {
+int ConfigManager::GetPackageCacheExpirationTimeDays(
+    IPolicyStatusValue** policy_status_value) const {
   DWORD kDefaultCacheLifeTimeInDays = 180;  // 180 days.
   DWORD kMaxCacheLifeTimeInDays = 1800;     // Roughly 5 years.
 
-  if (!IsEnrolledToDomain()) {
-    OPT_LOG(L5, (_T("[GetPackageCacheExpirationTimeDays]")
-                 _T("[Ignoring group policy]")
-                 _T("[machine is not part of a domain]")));
-    return kDefaultCacheLifeTimeInDays;
+  PolicyValue<DWORD> v;
+
+  for (size_t i = 0; i != policies_.size(); ++i) {
+    DWORD cache_life_limit = 0;
+    HRESULT hr = policies_[i]->GetPackageCacheExpirationTimeDays(
+        &cache_life_limit);
+
+    if (SUCCEEDED(hr)) {
+      if (cache_life_limit <= kMaxCacheLifeTimeInDays && cache_life_limit > 0) {
+        v.Update(policies_[i]->IsManaged(),
+                 policies_[i]->source(),
+                 cache_life_limit);
+      }
+    }
   }
 
-  DWORD cache_life_limit = 0;
-  if (FAILED(RegKey::GetValue(kRegKeyGoopdateGroupPolicy,
-                              kRegValueCacheLifeLimitDays,
-                              &cache_life_limit)) ||
-      cache_life_limit > kMaxCacheLifeTimeInDays ||
-      cache_life_limit == 0) {
-    cache_life_limit = kDefaultCacheLifeTimeInDays;
+  v.UpdateFinal(kDefaultCacheLifeTimeInDays, policy_status_value);
+
+  OPT_LOG(L5, (_T("[GetPackageCacheExpirationTimeDays][%s]"), v.ToString()));
+
+  return v.value();
+}
+
+HRESULT ConfigManager::GetProxyMode(
+    CString* proxy_mode,
+    IPolicyStatusValue** policy_status_value) const {
+  ASSERT1(proxy_mode);
+
+  PolicyValue<CString> v;
+
+  for (size_t i = 0; i != policies_.size(); ++i) {
+    CString mode;
+    HRESULT hr = policies_[i]->GetProxyMode(&mode);
+    if (SUCCEEDED(hr)) {
+      v.Update(policies_[i]->IsManaged(), policies_[i]->source(), mode);
+    }
   }
 
-  return static_cast<int>(cache_life_limit);
+  if (v.source().IsEmpty()) {
+    // No managed source had a value set for this policy. There is no local
+    // default value for this policy. So we return failure.
+    return E_FAIL;
+  }
+
+  v.UpdateFinal(CString(), policy_status_value);
+
+  OPT_LOG(L5, (_T("[GetProxyMode][%s]"), v.ToString()));
+
+  *proxy_mode = v.value();
+  return S_OK;
+}
+
+HRESULT ConfigManager::GetProxyPacUrl(
+    CString* proxy_pac_url,
+    IPolicyStatusValue** policy_status_value) const {
+  ASSERT1(proxy_pac_url);
+
+  PolicyValue<CString> v;
+
+  for (size_t i = 0; i != policies_.size(); ++i) {
+    CString pac_url;
+    HRESULT hr = policies_[i]->GetProxyPacUrl(&pac_url);
+    if (SUCCEEDED(hr)) {
+      v.Update(policies_[i]->IsManaged(), policies_[i]->source(), pac_url);
+    }
+  }
+
+  if (v.source().IsEmpty()) {
+    // No managed source had a value set for this policy. There is no local
+    // default value for this policy. So we return failure.
+    return E_FAIL;
+  }
+
+  v.UpdateFinal(CString(), policy_status_value);
+
+  OPT_LOG(L5, (_T("[GetProxyPacUrl][%s]"), v.ToString()));
+
+  *proxy_pac_url = v.value();
+  return S_OK;
+}
+
+HRESULT ConfigManager::GetProxyServer(
+    CString* proxy_server,
+    IPolicyStatusValue** policy_status_value) const {
+  ASSERT1(proxy_server);
+
+  PolicyValue<CString> v;
+
+  for (size_t i = 0; i != policies_.size(); ++i) {
+    CString server;
+    HRESULT hr = policies_[i]->GetProxyServer(&server);
+    if (SUCCEEDED(hr)) {
+      v.Update(policies_[i]->IsManaged(), policies_[i]->source(), server);
+    }
+  }
+
+  if (v.source().IsEmpty()) {
+    // No managed source had a value set for this policy. There is no local
+    // default value for this policy. So we return failure.
+    return E_FAIL;
+  }
+
+  v.UpdateFinal(CString(), policy_status_value);
+
+  OPT_LOG(L5, (_T("[GetProxyServer][%s]"), v.ToString()));
+
+  *proxy_server = v.value();
+  return S_OK;
+}
+
+HRESULT ConfigManager::GetForceInstallApps(
+    bool is_machine,
+    std::vector<CString>* app_ids,
+    IPolicyStatusValue** policy_status_value) const {
+  ASSERT1(app_ids);
+
+  PolicyValue<std::vector<CString>> v;
+
+  for (size_t i = 0; i != policies_.size(); ++i) {
+    std::vector<CString> t;
+    HRESULT hr = policies_[i]->GetForceInstallApps(is_machine, &t);
+    if (SUCCEEDED(hr)) {
+      v.Update(policies_[i]->IsManaged(), policies_[i]->source(), t);
+    }
+  }
+
+  if (v.source().IsEmpty()) {
+    // No managed source had a value set for this policy. There is no local
+    // default value for this policy. So we return failure.
+    return E_FAIL;
+  }
+
+  v.UpdateFinal(std::vector<CString>(), policy_status_value);
+
+  OPT_LOG(L5, (_T("[GetForceInstallApps][is_machine][%d][%s]"), is_machine,
+               v.ToString()));
+
+  *app_ids = v.value();
+  return S_OK;
 }
 
 CString ConfigManager::GetMachineGoopdateInstallDirNoCreate() const {
@@ -594,6 +788,29 @@ CString ConfigManager::GetMachineGoopdateInstallDir() const {
                              true,
                              &path));
   return path;
+}
+
+CString ConfigManager::GetUserCompanyDir() const {
+  CString path;
+  VERIFY_SUCCEEDED(GetDir32(CSIDL_LOCAL_APPDATA,
+                            CString(OMAHA_REL_COMPANY_DIR),
+                            false,
+                            &path));
+  return path;
+}
+
+CString ConfigManager::GetMachineCompanyDir() const {
+  CString path;
+  VERIFY_SUCCEEDED(GetDir32(CSIDL_PROGRAM_FILES,
+                            CString(OMAHA_REL_COMPANY_DIR),
+                            false,
+                            &path));
+  return path;
+}
+
+CString ConfigManager::GetTempDir() const {
+  return ::IsUserAnAdmin() ? GetSecureSystemTempDir() :
+                             app_util::GetTempDirForImpersonatedOrCurrentUser();
 }
 
 bool ConfigManager::IsRunningFromMachineGoopdateInstallDir() const {
@@ -670,6 +887,20 @@ HRESULT ConfigManager::GetUsageStatsReportUrl(CString* url) const {
   return S_OK;
 }
 
+HRESULT ConfigManager::GetAppLogoUrl(CString* url) const {
+  ASSERT1(url);
+
+  if (SUCCEEDED(RegKey::GetValue(MACHINE_REG_UPDATE_DEV,
+                                 kRegValueNameAppLogoUrl,
+                                 url))) {
+    CORE_LOG(L5, (_T("['app logo url' override %s]"), *url));
+    return S_OK;
+  }
+
+  *url = kUrlAppLogo;
+  return S_OK;
+}
+
 #if defined(HAS_DEVICE_MANAGEMENT)
 
 HRESULT ConfigManager::GetDeviceManagementUrl(CString* url) const {
@@ -697,8 +928,189 @@ CPath ConfigManager::GetPolicyResponsesDir() const {
 
 #endif  // defined(HAS_DEVICE_MANAGEMENT)
 
+HRESULT ConfigManager::LoadPolicies(bool should_acquire_critical_section) {
+  HRESULT hr = LoadGroupPolicies(should_acquire_critical_section);
+  if (FAILED(hr)) {
+    return hr;
+  }
+
+  policies_.clear();
+  if (are_cloud_policies_preferred_) {
+    policies_.push_back(dm_policy_manager_);
+    policies_.push_back(group_policy_manager_);
+  } else {
+    policies_.push_back(group_policy_manager_);
+    policies_.push_back(dm_policy_manager_);
+  }
+
+  return hr;
+}
+
+HRESULT ConfigManager::LoadGroupPolicies(bool should_acquire_critical_section) {
+  CachedOmahaPolicy group_policies;
+  ON_SCOPE_EXIT_OBJ(*group_policy_manager_, &OmahaPolicyManager::set_policy,
+                    ByRef(group_policies));
+
+  HANDLE policy_critical_section = NULL;
+  ScopeGuard guard_policy_critical_section =
+      MakeGuard(::LeaveCriticalPolicySection, ByRef(policy_critical_section));
+
+  // The Policy critical section will only be taken if the machine is
+  // Enterprise-joined and `should_acquire_critical_section` is true.
+  if (IsEnterpriseManaged()) {
+    group_policies.is_managed = true;
+
+    if (should_acquire_critical_section) {
+      policy_critical_section = ::EnterCriticalPolicySection(TRUE);
+      // Not getting the policy critical section is a fatal error. So we will
+      // crash here if `policy_critical_section` is NULL.
+      if (!policy_critical_section) {
+        __debugbreak();
+      }
+    } else {
+      guard_policy_critical_section.Dismiss();
+      // Fall through to read the policies.
+    }
+
+  } else {
+    guard_policy_critical_section.Dismiss();
+    OPT_LOG(L1, (_T("[ConfigManager::LoadGroupPolicies][Machine is not ")
+                 _T("Enterprise Managed]")));
+
+    // We still fall through to read the policies in order to store them as
+    // a conflict source in chrome://policy. The policies will not be respected
+    // however.
+  }
+
+  if (!RegKey::HasKey(kRegKeyGoopdateGroupPolicy)) {
+    group_policies.is_managed = false;
+
+    OPT_LOG(L1, (_T("[ConfigManager::LoadGroupPolicies][No Group Policies ")
+                 _T("found under key][%s]"),
+                 kRegKeyGoopdateGroupPolicy));
+
+    return S_FALSE;
+  }
+
+  RegKey group_policy_key;
+  HRESULT hr = group_policy_key.Open(kRegKeyGoopdateGroupPolicy, KEY_READ);
+  if (FAILED(hr)) {
+    if (group_policies.is_managed) {
+      // Not getting the Group Policies is a fatal error if this is a managed
+      // machine. So we will crash here.
+      __debugbreak();
+    }
+
+    return hr;
+  }
+
+  group_policies.is_initialized = true;
+
+  GetPolicyDword(kRegValueCloudPolicyOverridesPlatformPolicy,
+                 &are_cloud_policies_preferred_);
+
+  GetPolicyDword(kRegValueAutoUpdateCheckPeriodOverrideMinutes,
+                 &group_policies.auto_update_check_period_minutes);
+  GetPolicyString(kRegValueDownloadPreference,
+                  &group_policies.download_preference);
+  GetPolicyDword(kRegValueCacheSizeLimitMBytes,
+                 &group_policies.cache_size_limit);
+  GetPolicyDword(kRegValueCacheLifeLimitDays, &group_policies.cache_life_limit);
+
+  GetPolicyDword(kRegValueUpdatesSuppressedStartHour,
+                 &group_policies.updates_suppressed.start_hour);
+  GetPolicyDword(kRegValueUpdatesSuppressedStartMin,
+                 &group_policies.updates_suppressed.start_minute);
+  GetPolicyDword(kRegValueUpdatesSuppressedDurationMin,
+                 &group_policies.updates_suppressed.duration_min);
+
+  GetPolicyString(kRegValueProxyMode, &group_policies.proxy_mode);
+  GetPolicyString(kRegValueProxyServer, &group_policies.proxy_server);
+  GetPolicyString(kRegValueProxyPacUrl, &group_policies.proxy_pac_url);
+
+  GetPolicyDword(kRegValueInstallAppsDefault, &group_policies.install_default);
+  GetPolicyDword(kRegValueUpdateAppsDefault, &group_policies.update_default);
+
+  static const int kGuidLen = 38;
+  int value_count = group_policy_key.GetValueCount();
+  for (int i = 0; i < value_count; ++i) {
+    CString value_name;
+    DWORD type = 0;
+    if (FAILED(group_policy_key.GetValueNameAt(i, &value_name, &type))) {
+      continue;
+    }
+
+    int app_id_start = value_name.Find(_T('{'));
+    if (app_id_start <= 0) {
+      continue;
+    }
+
+    CString app_id_string = value_name.Mid(app_id_start);
+    GUID app_id = {};
+    if (app_id_string.GetLength() != kGuidLen ||
+        FAILED(StringToGuidSafe(app_id_string, &app_id)) ||
+        GUID_NULL == app_id) {
+      continue;
+    }
+
+    CString policy_name = value_name.Left(app_id_start);
+
+    switch (type) {
+      case REG_DWORD: {
+        DWORD dword_policy_value = 0;
+        if (SUCCEEDED(
+                group_policy_key.GetValue(value_name, &dword_policy_value))) {
+          if (!policy_name.CompareNoCase(kRegValueInstallAppPrefix)) {
+            group_policies.application_settings[app_id].install =
+                dword_policy_value;
+          } else if (!policy_name.CompareNoCase(kRegValueUpdateAppPrefix)) {
+            group_policies.application_settings[app_id].update =
+                dword_policy_value;
+          } else if (!policy_name.CompareNoCase(
+                         kRegValueRollbackToTargetVersion)) {
+            group_policies.application_settings[app_id]
+                .rollback_to_target_version = dword_policy_value;
+          } else {
+            OPT_LOG(LW, (_T("[ConfigManager::LoadGroupPolicies][Unexpected ")
+                         _T("DWORD policy prefix encountered][%s][%d]"),
+                         value_name, dword_policy_value));
+          }
+        }
+        break;
+      }
+
+      case REG_SZ: {
+        CString string_policy_value;
+        if (SUCCEEDED(
+                group_policy_key.GetValue(value_name, &string_policy_value))) {
+          if (!policy_name.CompareNoCase(kRegValueTargetChannel)) {
+            group_policies.application_settings[app_id].target_channel =
+                string_policy_value;
+          } else if (!policy_name.CompareNoCase(kRegValueTargetVersionPrefix)) {
+            group_policies.application_settings[app_id].target_version_prefix =
+                string_policy_value;
+          } else {
+            OPT_LOG(LW, (_T("[ConfigManager::LoadGroupPolicies][Unexpected ")
+                         _T("String policy prefix encountered][%s][%s]"),
+                         value_name, string_policy_value));
+          }
+        }
+        break;
+      }
+
+      default:
+        OPT_LOG(LW, (_T("[ConfigManager::LoadGroupPolicies][Unexpected Type ")
+                     _T("for policy prefix encountered][%s][%d]"),
+                     value_name, type));
+        break;
+    }
+  }
+
+  return S_OK;
+}
+
 void ConfigManager::SetOmahaDMPolicies(const CachedOmahaPolicy& dm_policy) {
-  dm_policy_manager_->set_dm_policy(dm_policy);
+  dm_policy_manager_->set_policy(dm_policy);
   REPORT_LOG(L1, (_T("[ConfigManager::SetOmahaDMPolicies][%s]"),
                   dm_policy.ToString()));
 }
@@ -712,54 +1124,47 @@ void ConfigManager::SetOmahaDMPolicies(const CachedOmahaPolicy& dm_policy) {
 int ConfigManager::GetLastCheckPeriodSec(bool* is_overridden) const {
   ASSERT1(is_overridden);
 
+  return GetLastCheckPeriodSec(is_overridden, NULL);
+}
+
+int ConfigManager::GetLastCheckPeriodSec(
+    bool* is_overridden, IPolicyStatusValue** status_value_minutes) const {
+  ASSERT1(is_overridden);
+
+  PolicyValue<SecondsMinutes> v;
+
   DWORD policy_period_sec = 0;
   if (SUCCEEDED(RegKey::GetValue(MACHINE_REG_UPDATE_DEV,
                                  kRegValueLastCheckPeriodSec,
                                  &policy_period_sec))) {
-    CORE_LOG(L5, (_T("['LastCheckPeriodSec' override %d]"), policy_period_sec));
-    *is_overridden = true;
+    if (policy_period_sec > 0 && policy_period_sec < kMinLastCheckPeriodSec) {
+      policy_period_sec = kMinLastCheckPeriodSec;
+    } else if (policy_period_sec > INT_MAX) {
+      policy_period_sec = INT_MAX;
+    }
+    v.Update(true, _T("UpdateDev"), {policy_period_sec});
   } else {
     DWORD minutes = 0;
     HRESULT hr = E_FAIL;
     for (size_t i = 0; i != policies_.size(); ++i) {
-      if (!policies_[i]->IsManaged()) {
-        continue;
-      }
-
       hr = policies_[i]->GetLastCheckPeriodMinutes(&minutes);
-      OPT_LOG(L5, (_T("[GetLastCheckPeriodMinutes][%s][%d]"),
-                   policies_[i]->source(), minutes));
-      break;
-    }
-
-    *is_overridden = SUCCEEDED(hr);
-    if (*is_overridden) {
-      policy_period_sec = (minutes > UINT_MAX / 60) ? UINT_MAX : minutes * 60;
+      if (SUCCEEDED(hr)) {
+        policy_period_sec = minutes * 60ULL > INT_MAX ? INT_MAX : minutes * 60;
+        v.Update(policies_[i]->IsManaged(),
+                 policies_[i]->source(),
+                 {policy_period_sec});
+      }
     }
   }
 
-  if (*is_overridden) {
-    if (0 == policy_period_sec) {
-      OPT_LOG(L5, (_T("[GetLastCheckPeriodSec][0 == policy_period_sec]")));
-      return 0;
-    }
-    const int period_sec = policy_period_sec > INT_MAX ?
-                           INT_MAX :
-                           static_cast<int>(policy_period_sec);
+  *is_overridden = !v.source().IsEmpty();
+  policy_period_sec = IsInternalUser() ? kLastCheckPeriodInternalUserSec :
+                                         kLastCheckPeriodSec;
+  v.UpdateFinal({policy_period_sec}, status_value_minutes);
 
-    if (period_sec < kMinLastCheckPeriodSec) {
-      return kMinLastCheckPeriodSec;
-    }
-    OPT_LOG(L5, (_T("[GetLastCheckPeriodSec][period_sec][%d]"), period_sec));
-    return period_sec;
-  }
+  OPT_LOG(L5, (_T("[GetLastCheckPeriodMinutes][%s]"), v.ToString()));
 
-  // Returns a lower value for internal users.
-  if (IsInternalUser()) {
-    return kLastCheckPeriodInternalUserSec;
-  }
-
-  return kLastCheckPeriodSec;
+  return v.value().seconds;
 }
 
 // All time values are in seconds.
@@ -1165,185 +1570,196 @@ bool ConfigManager::IsInternalUser() const {
   return false;
 }
 
-DWORD ConfigManager::GetEffectivePolicyForAppInstalls(const GUID& app_guid)
-    const {
-  for (size_t i = 0; i != policies_.size(); ++i) {
-    if (!policies_[i]->IsManaged()) {
-      continue;
-    }
+DWORD ConfigManager::GetEffectivePolicyForAppInstalls(
+    const GUID& app_guid, IPolicyStatusValue** policy_status_value) const {
+  PolicyValue<DWORD> v;
 
+  for (size_t i = 0; i != policies_.size(); ++i) {
     DWORD effective_policy = kPolicyDisabled;
     HRESULT hr = policies_[i]->GetEffectivePolicyForAppInstalls(
         app_guid,
         &effective_policy);
     if (SUCCEEDED(hr)) {
-      OPT_LOG(L5, (_T("[GetEffectivePolicyForAppInstalls][%s][%d]"),
-                   policies_[i]->source(), effective_policy));
-      return effective_policy;
+      v.Update(policies_[i]->IsManaged(),
+               policies_[i]->source(),
+               effective_policy);
     }
-
-    return kInstallPolicyDefault;
   }
 
-  OPT_LOG(L5, (_T("[GetEffectivePolicyForAppInstalls][Ignoring policy][%s]")
-               _T("[machine is not part of a domain or Device Management]"),
-               GuidToString(app_guid)));
-  return kInstallPolicyDefault;
+  v.UpdateFinal(kInstallPolicyDefault, policy_status_value);
+
+  OPT_LOG(L5, (_T("[GetEffectivePolicyForAppInstalls][%s][%s]"),
+               GuidToString(app_guid), v.ToString()));
+
+  return v.value();
 }
 
-DWORD ConfigManager::GetEffectivePolicyForAppUpdates(const GUID& app_guid)
-    const {
-  for (size_t i = 0; i != policies_.size(); ++i) {
-    if (!policies_[i]->IsManaged()) {
-      continue;
-    }
+DWORD ConfigManager::GetEffectivePolicyForAppUpdates(
+    const GUID& app_guid, IPolicyStatusValue** policy_status_value) const {
+  PolicyValue<DWORD> v;
 
+  for (size_t i = 0; i != policies_.size(); ++i) {
     DWORD effective_policy = kPolicyDisabled;
     HRESULT hr = policies_[i]->GetEffectivePolicyForAppUpdates(
         app_guid,
         &effective_policy);
     if (SUCCEEDED(hr)) {
-      OPT_LOG(L5, (_T("[GetEffectivePolicyForAppUpdates][%s][%d]"),
-                   policies_[i]->source(), effective_policy));
-      return effective_policy;
+      v.Update(policies_[i]->IsManaged(),
+               policies_[i]->source(),
+               effective_policy);
     }
-
-    return kUpdatePolicyDefault;
   }
 
-  OPT_LOG(L5, (_T("[GetEffectivePolicyForAppUpdates][Ignoring policy][%s]")
-               _T("[machine is not part of a domain or Device Management]"),
-               GuidToString(app_guid)));
-  return kUpdatePolicyDefault;
+  v.UpdateFinal(kUpdatePolicyDefault, policy_status_value);
+
+  OPT_LOG(L5, (_T("[GetEffectivePolicyForAppUpdates][%s][%s]"),
+               GuidToString(app_guid), v.ToString()));
+
+  return v.value();
 }
 
-CString ConfigManager::GetTargetVersionPrefix(const GUID& app_guid) const {
-  for (size_t i = 0; i != policies_.size(); ++i) {
-    if (!policies_[i]->IsManaged()) {
-      continue;
-    }
+CString ConfigManager::GetTargetChannel(
+    const GUID& app_guid, IPolicyStatusValue** policy_status_value) const {
+  PolicyValue<CString> v;
 
+  for (size_t i = 0; i != policies_.size(); ++i) {
+    CString target_channel;
+    HRESULT hr = policies_[i]->GetTargetChannel(app_guid, &target_channel);
+    if (SUCCEEDED(hr)) {
+      v.Update(policies_[i]->IsManaged(),
+               policies_[i]->source(),
+               target_channel);
+    }
+  }
+
+  v.UpdateFinal(CString(), policy_status_value);
+
+  OPT_LOG(L5, (_T("[GetTargetChannel][%s][%s]"),
+               GuidToString(app_guid), v.ToString()));
+  return v.value();
+}
+
+CString ConfigManager::GetTargetVersionPrefix(
+    const GUID& app_guid, IPolicyStatusValue** policy_status_value) const {
+  PolicyValue<CString> v;
+
+  for (size_t i = 0; i != policies_.size(); ++i) {
     CString target_version_prefix;
     HRESULT hr = policies_[i]->GetTargetVersionPrefix(app_guid,
                                                       &target_version_prefix);
     if (SUCCEEDED(hr)) {
-      OPT_LOG(L5, (_T("[GetTargetVersionPrefix][%s][%s]"),
-                   policies_[i]->source(), target_version_prefix));
-      return target_version_prefix;
+      v.Update(policies_[i]->IsManaged(),
+               policies_[i]->source(),
+               target_version_prefix);
     }
-
-    return CString();
   }
 
-  OPT_LOG(L5, (_T("[GetTargetVersionPrefix][Ignoring policy][%s]")
-               _T("[machine is not part of a domain or Device Management]"),
-               GuidToString(app_guid)));
-  return CString();
+  v.UpdateFinal(CString(), policy_status_value);
+
+  OPT_LOG(L5, (_T("[GetTargetVersionPrefix][%s][%s]"),
+               GuidToString(app_guid), v.ToString()));
+
+  return v.value();
 }
 
-bool ConfigManager::IsRollbackToTargetVersionAllowed(const GUID& app_guid)
-    const {
-  for (size_t i = 0; i != policies_.size(); ++i) {
-    if (!policies_[i]->IsManaged()) {
-      continue;
-    }
+bool ConfigManager::IsRollbackToTargetVersionAllowed(
+    const GUID& app_guid, IPolicyStatusValue** policy_status_value) const {
+  PolicyValue<bool> v;
 
+  for (size_t i = 0; i != policies_.size(); ++i) {
     bool rollback_allowed = false;
     HRESULT hr = policies_[i]->IsRollbackToTargetVersionAllowed(
         app_guid,
         &rollback_allowed);
     if (SUCCEEDED(hr)) {
-      OPT_LOG(L5, (_T("[IsRollbackToTargetVersionAllowed][%s][%d]"),
-                   policies_[i]->source(), rollback_allowed));
-      return rollback_allowed;
+      v.Update(policies_[i]->IsManaged(),
+               policies_[i]->source(),
+               rollback_allowed);
     }
-
-    return false;
   }
 
-  OPT_LOG(L5, (_T("[IsRollbackToTargetVersionAllowed][Ignoring policy][%s]")
-               _T("[machine is not part of a domain or Device Management]"),
-               GuidToString(app_guid)));
-  return false;
+  v.UpdateFinal(false, policy_status_value);
+
+  OPT_LOG(L5, (_T("[IsRollbackToTargetVersionAllowed][%s][%s]"),
+               GuidToString(app_guid), v.ToString()));
+
+  return v.value();
 }
 
 HRESULT ConfigManager::GetUpdatesSuppressedTimes(
-    DWORD* start_hour,
-    DWORD* start_min,
-    DWORD* duration_min,
-    bool* are_updates_suppressed) const {
-  ASSERT1(start_hour);
-  ASSERT1(start_min);
-  ASSERT1(duration_min);
+    const CTime& time,
+    UpdatesSuppressedTimes* times,
+    bool* are_updates_suppressed,
+    IPolicyStatusValue** policy_status_value) const {
+  ASSERT1(times);
   ASSERT1(are_updates_suppressed);
+
+  PolicyValue<UpdatesSuppressedTimes> v;
 
   HRESULT hr = E_FAIL;
   for (size_t i = 0; i != policies_.size(); ++i) {
-    if (!policies_[i]->IsManaged()) {
-      continue;
+    UpdatesSuppressedTimes t;
+    hr = policies_[i]->GetUpdatesSuppressedTimes(&t);
+    if (SUCCEEDED(hr)) {
+      v.Update(policies_[i]->IsManaged(), policies_[i]->source(), t);
     }
-
-    hr = policies_[i]->GetUpdatesSuppressedTimes(start_hour,
-                                                 start_min,
-                                                 duration_min);
-    OPT_LOG(L5, (_T("[GetUpdatesSuppressedTimes][%s][%d][%d][%d]"),
-        policies_[i]->source(), *start_hour, *start_min, *duration_min));
-    break;
   }
 
-  if (FAILED(hr)) {
-    return hr;
+  if (v.source().IsEmpty()) {
+    // No managed source had a value set.
+    return E_FAIL;
   }
 
   // UpdatesSuppressedDurationMin is limited to 16 hours.
-  if (*start_hour > 23 || *start_min > 59 || *duration_min > 16 * kMinPerHour) {
+  if (v.value().start_hour > 23 ||
+      v.value().start_min > 59 ||
+      v.value().duration_min > 16 * kMinPerHour) {
     OPT_LOG(L5, (_T("[GetUpdatesSuppressedTimes][Out of bounds][%x][%x][%x]"),
-                 *start_hour, *start_min, *duration_min));
+                 v.value().start_hour,
+                 v.value().start_min,
+                 v.value().duration_min));
     return E_UNEXPECTED;
   }
 
-  CTime now(CTime::GetCurrentTime());
-  tm local = {};
-  now.GetLocalTm(&local);
+  v.UpdateFinal(UpdatesSuppressedTimes(), policy_status_value);
+  *times = v.value();
 
-  // tm_year is relative to 1900. tm_mon is 0-based.
-  CTime start_updates_suppressed(local.tm_year + 1900,
-    local.tm_mon + 1,
-    local.tm_mday,
-    *start_hour,
-    *start_min,
-    local.tm_sec,
-    local.tm_isdst);
-  CTimeSpan duration_updates_suppressed(0, 0, *duration_min, 0);
-  CTime end_updates_suppressed =
-    start_updates_suppressed + duration_updates_suppressed;
-  *are_updates_suppressed = now >= start_updates_suppressed &&
-                            now <= end_updates_suppressed;
+  tm local_time = {};
+  time.GetLocalTm(&local_time);
+  int time_diff_minutes =
+      (local_time.tm_hour - v.value().start_hour) * kMinPerHour +
+      (local_time.tm_min - v.value().start_min);
 
+  // Add 24 hours if `time_diff_minutes` is negative.
+  if (time_diff_minutes < 0) {
+    time_diff_minutes += 24 * kMinPerHour;
+  }
+
+  *are_updates_suppressed =
+      time_diff_minutes < static_cast<int>(v.value().duration_min);
+  OPT_LOG(L5, (_T("[GetUpdatesSuppressedTimes][v=%s][time=%s]")
+               _T("[time_diff_minutes=%d][are_updates_suppressed=%d]"),
+               v.ToString(), time.Format(L"%#c"),
+               time_diff_minutes, *are_updates_suppressed));
   return S_OK;
 }
 
-bool ConfigManager::AreUpdatesSuppressedNow() const {
-  DWORD start_hour = 0;
-  DWORD start_min = 0;
-  DWORD duration_min = 0;
+bool ConfigManager::AreUpdatesSuppressedNow(const CTime& now) const {
+  UpdatesSuppressedTimes times;
   bool are_updates_suppressed = false;
 
-  HRESULT hr = GetUpdatesSuppressedTimes(&start_hour,
-                                         &start_min,
-                                         &duration_min,
-                                         &are_updates_suppressed);
-  if (FAILED(hr)) {
-    return false;
-  }
-
-  return are_updates_suppressed;
+  HRESULT hr = GetUpdatesSuppressedTimes(now,
+                                         &times,
+                                         &are_updates_suppressed,
+                                         NULL);
+  return SUCCEEDED(hr) && are_updates_suppressed;
 }
+
 bool ConfigManager::CanInstallApp(const GUID& app_guid, bool is_machine) const {
   // Google Update should never be checking whether it can install itself.
   ASSERT1(!::IsEqualGUID(kGoopdateGuid, app_guid));
 
-  auto policy = GetEffectivePolicyForAppInstalls(app_guid);
+  auto policy = GetEffectivePolicyForAppInstalls(app_guid, NULL);
   return kPolicyDisabled != policy &&
          (is_machine || kPolicyEnabledMachineOnly != policy);
 }
@@ -1354,8 +1770,8 @@ bool ConfigManager::CanUpdateApp(const GUID& app_guid, bool is_manual) const {
     return true;
   }
 
-  const DWORD effective_policy = GetEffectivePolicyForAppUpdates(app_guid);
-
+  const DWORD effective_policy = GetEffectivePolicyForAppUpdates(app_guid,
+                                                                 NULL);
   if (kPolicyDisabled == effective_policy) {
     return false;
   }
@@ -1377,6 +1793,18 @@ bool ConfigManager::AlwaysAllowCrashUploads() const {
   return always_allow_crash_uploads != 0;
 }
 
+bool ConfigManager::ShouldVerifyPayloadAuthenticodeSignature() const {
+#ifdef VERIFY_PAYLOAD_AUTHENTICODE_SIGNATURE
+  DWORD disabled_in_registry = 0;
+  RegKey::GetValue(MACHINE_REG_UPDATE_DEV,
+                   kRegValueDisablePayloadAuthenticodeVerification,
+                   &disabled_in_registry);
+  return disabled_in_registry == 0;
+#else
+  return false;
+#endif  // VERIFY_PAYLOAD_AUTHENTICODE_SIGNATURE
+}
+
 int ConfigManager::MaxCrashUploadsPerDay() const {
   DWORD num_uploads = 0;
   if (FAILED(RegKey::GetValue(MACHINE_REG_UPDATE_DEV,
@@ -1392,28 +1820,26 @@ int ConfigManager::MaxCrashUploadsPerDay() const {
   return static_cast<int>(num_uploads);
 }
 
-CString ConfigManager::GetDownloadPreferenceGroupPolicy() const {
-  for (size_t i = 0; i != policies_.size(); ++i) {
-    if (!policies_[i]->IsManaged()) {
-      continue;
-    }
+CString ConfigManager::GetDownloadPreferenceGroupPolicy(
+    IPolicyStatusValue** policy_status_value) const {
+  PolicyValue<CString> v;
 
+  for (size_t i = 0; i != policies_.size(); ++i) {
     CString download_preference;
     HRESULT hr = policies_[i]->GetDownloadPreferenceGroupPolicy(
         &download_preference);
     if (SUCCEEDED(hr) && download_preference == kDownloadPreferenceCacheable) {
-      OPT_LOG(L5, (_T("[GetDownloadPreferenceGroupPolicy][%s][%s]"),
-                   policies_[i]->source(), download_preference));
-      return download_preference;
+      v.Update(policies_[i]->IsManaged(),
+               policies_[i]->source(),
+               download_preference);
     }
-
-    return CString();
   }
 
-  OPT_LOG(L5, (_T("[GetDownloadPreferenceGroupPolicy]")
-               _T("[Ignoring policy]")
-               _T("[machine is not part of a domain or Device Management]")));
-  return CString();
+  v.UpdateFinal(CString(), policy_status_value);
+
+  OPT_LOG(L5, (_T("[GetDownloadPreferenceGroupPolicy][%s]"), v.ToString()));
+
+  return v.value();
 }
 
 #if defined(HAS_DEVICE_MANAGEMENT)

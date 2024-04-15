@@ -53,7 +53,7 @@ PREFERENCES = """
           EXPLAIN !!Explain_AutoUpdateCheckPeriod
           PART !!Part_AutoUpdateCheckPeriod NUMERIC
             VALUENAME AutoUpdateCheckPeriodMinutes
-            DEFAULT 1400  ; 23 hours 20 minutes.
+            DEFAULT 295   ; 4 hours 55 minutes.
             MIN 0
             MAX 43200     ; 30 days.
             SPIN 60       ; Increment in hour chunks.
@@ -167,16 +167,36 @@ APPLICATIONS_HEADER = """
         EXPLAIN !!Explain_Applications
 """
 
-INSTALL_POLICY_ITEMLIST = """\
+INSTALL_POLICY_ITEMLIST_BEGIN = """\
             ITEMLIST
               NAME  !!Name_InstallsEnabled
               VALUE NUMERIC 1
               NAME  !!Name_InstallsEnabledMachineOnly
               VALUE NUMERIC 4
               NAME  !!Name_InstallsDisabled
-              VALUE NUMERIC 0
+              VALUE NUMERIC 0"""
+
+INSTALL_POLICY_FORCE_INSTALL_MACHINE = r"""
+                NAME  !!Name_ForceInstallsMachine
+                VALUE NUMERIC 5"""
+
+INSTALL_POLICY_FORCE_INSTALL_USER = r"""
+                NAME  !!Name_ForceInstallsUser
+                VALUE NUMERIC 6"""
+
+INSTALL_POLICY_ITEMLIST_APP_SPECIFIC = """\
+$ForceInstalls$"""
+
+INSTALL_POLICY_ITEMLIST_END = r"""
             END ITEMLIST
             REQUIRED"""
+
+INSTALL_POLICY_ITEMLIST = INSTALL_POLICY_ITEMLIST_BEGIN + \
+                          INSTALL_POLICY_ITEMLIST_END
+
+INSTALL_POLICY_ITEMLIST_APP_SPECIFIC = INSTALL_POLICY_ITEMLIST_BEGIN + \
+                                       INSTALL_POLICY_ITEMLIST_APP_SPECIFIC + \
+                                       INSTALL_POLICY_ITEMLIST_END
 
 UPDATE_POLICY_ITEMLIST = """\
             ITEMLIST
@@ -229,7 +249,8 @@ APP_POLICIES_TEMPLATE = ("""
             PART !!Part_InstallPolicy DROPDOWNLIST
               VALUENAME Install$AppGuid$
 """ +
-INSTALL_POLICY_ITEMLIST.replace('            ', '              ') + """
+INSTALL_POLICY_ITEMLIST_APP_SPECIFIC.replace('            ', '              ') +
+"""
             END PART
           END POLICY
 
@@ -242,6 +263,17 @@ INSTALL_POLICY_ITEMLIST.replace('            ', '              ') + """
               VALUENAME Update$AppGuid$
 """ +
 UPDATE_POLICY_ITEMLIST.replace('            ', '              ') + """
+            END PART
+          END POLICY
+
+          POLICY !!Pol_TargetChannel
+            #if version >= 4
+              SUPPORTED !!Sup_GoogleUpdate1_3_35_453
+            #endif
+            EXPLAIN !!Explain_TargetChannel$AppLegalId$
+
+            PART !!Part_TargetChannel EDITTEXT
+              VALUENAME "TargetChannel$AppGuid$"
             END PART
           END POLICY
 
@@ -281,6 +313,7 @@ APPLICATIONS_FOOTER = """
 ALLOW_INSTALLATION_POLICY = 'Allow installation'
 DEFAULT_ALLOW_INSTALLATION_POLICY = ALLOW_INSTALLATION_POLICY + ' default'
 UPDATE_POLICY = 'Update policy override'
+TARGET_CHANNEL_POLICY = 'Target Channel override'
 TARGET_VERSION_POLICY = 'Target version prefix override'
 ROLLBACK_VERSION_POLICY = 'Rollback to Target version'
 DEFAULT_UPDATE_POLICY = UPDATE_POLICY + ' default'
@@ -307,6 +340,7 @@ Sup_GoogleUpdate1_3_21_81=At least Google Update 1.3.21.81
 Sup_GoogleUpdate1_3_26_0=At least Google Update 1.3.26.0
 Sup_GoogleUpdate1_3_33_5=At least Google Update 1.3.33.5
 Sup_GoogleUpdate1_3_34_3=At least Google Update 1.3.34.3
+Sup_GoogleUpdate1_3_35_453=At least Google Update 1.3.35.453
 
 Cat_Google=Google
 Cat_GoogleUpdate=Google Update
@@ -324,6 +358,7 @@ Pol_DefaultAllowInstallation=""" + DEFAULT_ALLOW_INSTALLATION_POLICY + """
 Pol_AllowInstallation=""" + ALLOW_INSTALLATION_POLICY + """
 Pol_DefaultUpdatePolicy=""" + DEFAULT_UPDATE_POLICY + """
 Pol_UpdatePolicy=""" + UPDATE_POLICY + """
+Pol_TargetChannel=""" + TARGET_CHANNEL_POLICY + """
 Pol_TargetVersionPrefix=""" + TARGET_VERSION_POLICY + """
 Pol_RollbackToTargetVersion=""" + ROLLBACK_VERSION_POLICY + """
 
@@ -332,17 +367,20 @@ Part_DownloadPreference=Type of download URL to request
 Part_UpdateCheckSuppressedStartHour=Hour in a day that start to suppress update check
 Part_UpdateCheckSuppressedStartMin=Minute in hour that starts to suppress update check
 Part_UpdateCheckSuppressedDurationMin=Number of minutes to suppress update check each day
-Part_DisableAllAutoUpdateChecks=Disable all auto-update checks (not recommended)
+Part_DisableAllAutoUpdateChecks=Disable all periodic network traffic (not recommended)
 Part_ProxyMode=Choose how to specify proxy server settings
 Part_ProxyServer=Address or URL of proxy server
 Part_ProxyPacUrl=URL to a proxy .pac file
 Part_InstallPolicy=Policy
 Part_UpdatePolicy=Policy
+Part_TargetChannel=Target Channel
 Part_TargetVersionPrefix=Target version prefix
 
 Name_InstallsEnabled=Always allow Installs (recommended)
 Name_InstallsEnabledMachineOnly=Always allow Machine-Wide Installs, but not Per-User Installs
 Name_InstallsDisabled=Installs disabled
+Name_ForceInstallsMachine=Force Installs (Machine-Wide)
+Name_ForceInstallsUser=Force Installs (Per-User)
 
 Name_UpdatesEnabled=""" + UPDATES_ENABLED + """ (recommended)
 Name_ManualUpdatesOnly=""" + MANUAL_UPDATES_ONLY + """
@@ -388,7 +426,7 @@ HORIZONTAL_RULE +
 HORIZONTAL_RULE + """
 Explain_Preferences=General policies for Google Update.
 
-Explain_AutoUpdateCheckPeriod=Minimum number of minutes between automatic update checks.\\n\\n%(domain_requirement)s
+Explain_AutoUpdateCheckPeriod=Minimum number of minutes between automatic update checks.\\n\\nSet this policy to the value 0 to disable all periodic network traffic by Google Update. This is not recommended, as it prevents Google Update itself from receiving stability and security updates.\\n\\nThe "Update policy override default" and per-application "Update policy override" settings should be used to manage application updates rather than this setting.\\n\\n%(domain_requirement)s
 
 Explain_UpdateCheckSuppressedPeriod=If this setting is enabled, update checks will be suppressed during each day starting from Hour:Minute for a period of Duration (in minutes). Duration does not account for daylight savings time. So for instance, if the start time is 22:00, and with a duration of 480 minutes, the updates will be suppressed for 8 hours regardless of whether daylight savings time changes happen in between.\\n\\n%(domain_requirement)s
 
@@ -428,16 +466,28 @@ HORIZONTAL_RULE)
 
 DEFAULT_ROLLBACK_DISCLAIMER = """This policy is meant to serve as temporary measure when Enterprise Administrators need to downgrade for business reasons. To ensure users are protected by the latest security updates, the most recent version should be used. When versions are downgraded to older versions, there could be incompatibilities."""
 
+FORCE_INSTALLS_MACHINE_EXPLAIN = """Force Installs (Machine-Wide): Allows Deploying $AppName$ to all machines where Google Update is pre-installed. Requires Google Update 1.3.36.82 or higher.\\n\\n"""
+FORCE_INSTALLS_USER_EXPLAIN = """Force Installs (Per-User): Allows Deploying $AppName$ on a Per-User basis to all machines where Google Update is pre-installed Per-User. Requires Google Update 1.3.36.82 or higher.\\n\\n"""
+
 STRINGS_APP_POLICY_EXPLANATIONS_TEMPLATE = ("""
 ; $AppName$
 Explain_Install$AppLegalId$=Specifies whether $AppName$ can be installed using Google Update/Google Installer.\\
     \\n\\nIf this policy is not configured, $AppName$ can be installed as specified by \"""" + DEFAULT_ALLOW_INSTALLATION_POLICY + """\".\\
-    \\n\\n%(domain_requirement)s
+    \\n\\n$ForceInstallsExplain$%(domain_requirement)s
 
 Explain_AutoUpdate$AppLegalId$=Specifies how Google Update handles available $AppName$ updates from Google.\\
     \\n\\nIf this policy is not configured, Google Update handles available updates as specified by \"""" % {"domain_requirement": ADM_DOMAIN_REQUIREMENT_EN} + DEFAULT_UPDATE_POLICY + """\".\\
 """ +
 STRINGS_UPDATE_POLICY_OPTIONS.replace('$PreApplicationWord$', 'the') + '$AppUpdateExplainExtra$') + """\\
+    \\n\\n%(domain_requirement)s
+
+Explain_TargetChannel$AppLegalId$=Specifies which Channel $AppName$ should be updated to.\\
+    \\n\\nWhen this policy is enabled, the app will be updated to the Channel with this policy value.\\
+    \\n\\nSome examples:\\n\\
+    1) Not configured: app will be updated to the latest version available in the default Channel for the app.\\n\\
+    2) Policy value is set to "stable": the app will be updated to the latest stable version.\\n\\
+    2) Policy value is set to "beta": the app will be updated to the latest beta version.\\n\\
+    3) Policy value is "dev": the app will be updated to the latest dev version.\\n\\
     \\n\\n%(domain_requirement)s
 
 Explain_TargetVersionPrefix$AppLegalId$=Specifies which version $AppName$ should be updated to.\\
@@ -449,10 +499,9 @@ Explain_TargetVersionPrefix$AppLegalId$=Specifies which version $AppName$ should
     4) Policy value is "55.24.34": the app will be updated to this specific version only.\\
     \\n\\n%(domain_requirement)s
 
-Explain_RollbackToTargetVersion$AppLegalId$=Specifies that Google Update should roll installations of $AppName$ back to the version indicated by \"""" % {"domain_requirement": ADM_DOMAIN_REQUIREMENT_EN} + TARGET_VERSION_POLICY + """\".\\
-    \\n\\nThis policy setting has no effect unless \"""" + TARGET_VERSION_POLICY + """\" is set.\\
-    \\n\\nIf this policy is not configured or is disabled, installs that have a version higher than that specified by \"""" + TARGET_VERSION_POLICY + """\" will be left as-is.\\
-    \\n\\nIf this policy is enabled, installs that have a version higher than that specified by \"""" + TARGET_VERSION_POLICY + """\" will be downgraded to the highest available version that matches the target version.\\
+Explain_RollbackToTargetVersion$AppLegalId$=Specifies that Google Update should roll installations of $AppName$ back if the client has a higher version than that available.\\
+    \\n\\nIf this policy is not configured or is disabled, installs that have a version higher than that available will be left as-is. This could be the case if \"""" % {"domain_requirement": ADM_DOMAIN_REQUIREMENT_EN} + TARGET_CHANNEL_POLICY + """\" is set to a Channel with a lower version, if \"""" + TARGET_VERSION_POLICY + """\" matches a lower version on the Channel, or if a user had installed a higher version.\\
+    \\n\\nIf this policy is enabled, installs that have a version higher than that available will be downgraded to the highest available version, respecting any configured target Channel and target version.\\
     \\n\\n$AppRollbackDisclaimer$\\
     \\n\\n%(domain_requirement)s
 """ % {"domain_requirement": ADM_DOMAIN_REQUIREMENT_EN}
@@ -545,12 +594,26 @@ def GenerateGroupPolicyTemplate(apps):
       strings.
     """
 
-    (app_name, app_guid, update_explain_extra, rollback_disclaimer) = app
+    (app_name, app_guid, update_explain_extra, rollback_disclaimer,
+     force_install_machine, force_install_user) = app
+
     if not rollback_disclaimer:
       rollback_disclaimer = DEFAULT_ROLLBACK_DISCLAIMER
     rollback_disclaimer = string.replace(rollback_disclaimer, '\n', '\\n')
+
+    force_installs = ''
+    force_installs_explain = ''
+    if force_install_machine:
+      force_installs += INSTALL_POLICY_FORCE_INSTALL_MACHINE
+      force_installs_explain += FORCE_INSTALLS_MACHINE_EXPLAIN
+    if force_install_user:
+      force_installs += INSTALL_POLICY_FORCE_INSTALL_USER
+      force_installs_explain += FORCE_INSTALLS_USER_EXPLAIN
+
     # pylint: disable-msg=C6004
-    return (template.replace('$AppName$', app_name)
+    return (template.replace('$ForceInstalls$', force_installs)
+                    .replace('$ForceInstallsExplain$', force_installs_explain)
+                    .replace('$AppName$', app_name)
                     .replace('$AppLegalId$', _CreateLegalIdentifier(app_name))
                     .replace('$AppGuid$', app_guid)
                     .replace('$AppUpdateExplainExtra$', update_explain_extra)
@@ -616,11 +679,15 @@ if __name__ == '__main__':
       ('Google Test Foo',
        '{D6B08267-B440-4c85-9F79-E195E80D9937}',
        ' Check http://www.google.com/test_foo/.',
-       'Disclaimer'),
+       'Disclaimer',
+       True,
+       True),
       (u'Google User Test Foo\u00a9\u00ae\u2122',
        '{104844D6-7DDA-460b-89F0-FBF8AFDD0A67}',
        ' Check http://www.google.com/user_test_foo/.',
-       ''),
+       '',
+       False,
+       True),
       ]
   TEST_GOLD_FILENAME = 'test_gold.adm'
   TEST_OUTPUT_FILENAME = 'test_out.adm'

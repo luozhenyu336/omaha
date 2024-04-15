@@ -145,7 +145,7 @@ TEST(UtilsTest, ReadEntireFile) {
   ASSERT_FAILED(ReadEntireFile(L"C:\\F00Bar\\ImaginaryFile", 0, &buffer));
 
   ASSERT_SUCCEEDED(ReadEntireFile(file_name, 0, &buffer));
-  ASSERT_EQ(9405, buffer.size());
+  ASSERT_TRUE(9405 == buffer.size() /*LF*/ || 9514 == buffer.size() /*CRLF*/);
   buffer.resize(0);
   ASSERT_FAILED(ReadEntireFile(L"C:\\WINDOWS\\Greenstone.bmp", 1000, &buffer));
 }
@@ -527,15 +527,7 @@ TEST(UtilsTest, GetCurrentUserDefaultSecurityAttributes) {
 }
 
 TEST(UtilsTest, AddAllowedAce) {
-  CString test_file_path = ConcatenatePath(
-      app_util::GetCurrentModuleDirectory(), _T("TestAddAllowedAce.exe"));
-  EXPECT_SUCCEEDED(File::Remove(test_file_path));
-
-  EXPECT_SUCCEEDED(File::Copy(
-      ConcatenatePath(app_util::GetCurrentModuleDirectory(),
-                      _T("GoogleUpdate.exe")),
-      test_file_path,
-      false));
+  const CString test_file_path(GetTempFilename(_T("AddAllowedAce_")));
 
   CDacl dacl;
   EXPECT_TRUE(AtlGetDacl(test_file_path, SE_FILE_OBJECT, &dacl));
@@ -544,7 +536,7 @@ TEST(UtilsTest, AddAllowedAce) {
   EXPECT_SUCCEEDED(AddAllowedAce(test_file_path,
                                  SE_FILE_OBJECT,
                                  Sids::Dialup(),
-                                 FILE_GENERIC_READ,
+                                 FILE_GENERIC_WRITE,
                                  0));
 
   dacl.SetEmpty();
@@ -555,18 +547,18 @@ TEST(UtilsTest, AddAllowedAce) {
   EXPECT_SUCCEEDED(AddAllowedAce(test_file_path,
                                  SE_FILE_OBJECT,
                                  Sids::Dialup(),
-                                 FILE_GENERIC_READ,
+                                 FILE_GENERIC_WRITE,
                                  0));
   dacl.SetEmpty();
   EXPECT_TRUE(AtlGetDacl(test_file_path, SE_FILE_OBJECT, &dacl));
   EXPECT_EQ(original_ace_count + 1, dacl.GetAceCount());
 
   // Add a subset of the existing access. No ACE is added.
-  EXPECT_EQ(FILE_READ_ATTRIBUTES, FILE_GENERIC_READ & FILE_READ_ATTRIBUTES);
+  EXPECT_EQ(FILE_WRITE_ATTRIBUTES, FILE_GENERIC_WRITE & FILE_WRITE_ATTRIBUTES);
   EXPECT_SUCCEEDED(AddAllowedAce(test_file_path,
                                  SE_FILE_OBJECT,
                                  Sids::Dialup(),
-                                 FILE_READ_ATTRIBUTES,
+                                 FILE_WRITE_ATTRIBUTES,
                                  0));
   dacl.SetEmpty();
   EXPECT_TRUE(AtlGetDacl(test_file_path, SE_FILE_OBJECT, &dacl));
@@ -953,6 +945,13 @@ TEST(UtilsTest, DeleteDirectoryContents_FilesAndDirs) {
   EXPECT_TRUE(::PathIsDirectoryEmpty(source_dir));
 
   EXPECT_SUCCEEDED(DeleteDirectory(source_dir));
+}
+
+TEST(UtilsTest, LoadSystemLibrary) {
+ scoped_library winhttp_dll(LoadSystemLibrary(_T("winhttp.dll")));
+ EXPECT_TRUE(winhttp_dll);
+ scoped_library no_dll(LoadSystemLibrary(_T("no_such_dll.dll")));
+ EXPECT_FALSE(no_dll);
 }
 
 }  // namespace omaha

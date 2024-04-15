@@ -2,7 +2,7 @@
 
 This document describes version 3 of the Omaha client-server protocol.  Omaha launched on Windows with this version of the protocol in May 2011.  (Version 2 of the protocol launched in May 2007 on Windows and May 2008 on Mac; Version 1 of the protocol was never deployed publicly.)
 
-Version 2 is documented [here](ServerProtocolV2.md). An older description of the V3 protocol is [here](ServerProtocol.md).
+Version 2 is documented [here](ServerProtocolV2.md). An older description of the V3 protocol is [here](ServerProtocol.md). Version 3.1 is documented [here](https://chromium.googlesource.com/chromium/src.git/+/master/docs/updater/protocol_3_1.md).
 
 ## Introduction ##
 The Omaha protocol is designed to facilitate the acquisition, delivery, and metrics of software updates over the Internet. It is an application-layer protocol on top of HTTP.
@@ -171,6 +171,7 @@ Each product that is contained in the request is represented by exactly one `<ap
   * `cohort`: A machine-readable string identifying the release cohort (channel) that the app belongs to. Limited to ASCII characters 32 to 126 (inclusive) and a maximum length of 1024 characters. Default: "".
   * `cohorthint`: An machine-readable enum indicating that the client has a desire to switch to a different release cohort. The exact legal values are app-specific and should be shared between the server and app implementations. Limited to ASCII characters 32 to 126 (inclusive) and a maximum length of 1024 characters. Default: "".
   * `cohortname`: A stable non-localized human-readable enum indicating which (if any) set of messages the app should display to the user. For example, an app with a cohortname of "beta" might display beta-specific branding to the user. Limited to ASCII characters 32 to 127 (inclusive) and a maximum length of 1024 characters. Default: "".
+  * `release_channel`: A string indicating to the server which release channel this installation of the application should receive future updates from. Examples include "stable", "beta", "dev". An empty string indicates no preference. Default: "".
 
 ##### Legal Child Elements #####
   * Any number of `<data>`.
@@ -343,6 +344,7 @@ None.
   * `tttoken`: An opaque access token that can be used to identify the requesting client as a member of a trusted-tester group. If non-empty, the request SHOULD be sent over SSL or another. Default: "".
   * `updatedisabled`: An indication of whether the client will honor an update response, if it recieves one. Legal values are "true" (indicating that the client will ignore any update instruction) and "false" (indicating that the client will attempt an update if one is instructed). Default: "false".
   * `targetversionprefix`: A component-wise prefix of a version number, or a complete version number suffixed with the `$` character. The server SHOULD NOT return an update instruction to a version number that does not match the prefix or complete version number. The prefix is interpreted a dotted-tuple that specifies the exactly-matching elements; it is not a lexical prefix. (For example, "1.2.3" MUST match "1.2.3.4" but MUST NOT match "1.2.34".) Default: "".
+  * `sameversionupdate`: An indication of whether an update should be offered if the client has the same version as the update. Legal values are "true" (indicating that same version update should be offered) and "false" (indicating that same version update should not be offered). Default: "false".
 
 ##### Legal Child Elements #####
 None.
@@ -387,9 +389,9 @@ Each product that is contained in the response is represented by exactly one `<a
     * `error-unknownApplication`: The server is not aware of this product.
     * `error-invalidAppId`: The server could not parse the product's GUID.
   * `experiments`: A key/value list of experiment identifiers that the client should store its membership in and report to the server in future requests. Experiment labels are used to track membership in different experimental groups, and may be set at install or update time. The experiments string is formatted as a semicolon-delimited concatenation of experiment label strings. An experiment label string is an experiment name, followed by a '=' character, followed by an experimental label value, followed by a '|' character, followed by a full date-time of the format "Thu, 19 Nov 2015 15:46:57 -0700" (RFC 2822 compatible). Past the given date-time, the client SHOULD cease reporting membership in the experiment group. The client SHOULD NOT report the date-time in future requests to the server. For example: "crdiff=got\_bsdiff|Thu, 19 Nov 2015 15:46:57 -0700;optimized=O3|Wed, 18 Nov 2015 02:00:00 -0300". Default: "".
-  * `cohort`: See cohort in the `<request>`. If this attribute is transmitted in the response (even if the value is empty-string), the client should overwrite the current cohort of this app with the sent value. Limited to ASCII characters 32 to 127 (inclusive) and a maximum length of 1024 characters. No default value: the lack of a transmitted value has a different meaning than any transmitted value.
-  * `cohorthint`: See cohorthint in the `<request>`. If sent (even if the value is empty-string), the client should overwrite the current cohorthint of this app with the sent value. Limited to ASCII characters 32 to 127 (inclusive) and a maximum length of 1024 characters. No default value: the lack of a transmitted value has a different meaning than any transmitted value.
-  * `cohortname`: See cohortname in the `<request>`. If sent (even if the value is empty-string), the client should overwrite the current cohortname of this app with the sent value. Limited to ASCII characters 32 to 127 (inclusive) and a maximum length of 1024 characters. No default value: the lack of a transmitted value has a different meaning than any transmitted value.
+  * `cohort`: See cohort in the `<request>`. If and only if this attribute is transmitted in the response (even if the value is empty-string), the client should overwrite the current cohort of this app with the sent value. Limited to ASCII characters 32 to 127 (inclusive) and a maximum length of 1024 characters. No default value: the lack of a transmitted value has a different meaning than any transmitted value.
+  * `cohorthint`: See cohorthint in the `<request>`. If and only if sent (even if the value is empty-string), the client should overwrite the current cohorthint of this app with the sent value. Limited to ASCII characters 32 to 127 (inclusive) and a maximum length of 1024 characters. No default value: the lack of a transmitted value has a different meaning than any transmitted value.
+  * `cohortname`: See cohortname in the `<request>`. If and only if sent (even if the value is empty-string), the client should overwrite the current cohortname of this app with the sent value. Limited to ASCII characters 32 to 127 (inclusive) and a maximum length of 1024 characters. No default value: the lack of a transmitted value has a different meaning than any transmitted value.
 
 ##### Legal Child Elements #####
   * At most one `<ping>`.

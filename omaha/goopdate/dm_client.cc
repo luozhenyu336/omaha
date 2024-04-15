@@ -54,9 +54,9 @@ RegistrationState GetRegistrationState(DmStorage* dm_storage) {
 // Log categories are used within this function as follows:
 // OPT: diagnostic messages to be included in the log file in release builds.
 // REPORT: error messages to be included in the Windows Event Log.
-HRESULT RegisterIfNeeded(DmStorage* dm_storage) {
+HRESULT RegisterIfNeeded(DmStorage* dm_storage, bool is_foreground) {
   ASSERT1(dm_storage);
-  OPT_LOG(L1, (_T("[DmClient::RegisterIfNeeded]")));
+  OPT_LOG(L1, (_T("[DmClient::RegisterIfNeeded][%d]"), is_foreground));
 
   // No work to be done if the process is not running as an administrator, since
   // we will not be able to persist anything.
@@ -91,23 +91,20 @@ HRESULT RegisterIfNeeded(DmStorage* dm_storage) {
     return E_FAIL;
   }
 
+  if (!is_foreground) {
+    // Waits a while before registration. We are reusing the AutoUpdateJitterMs
+    // for simplicity.
+    const int dm_jitter_ms(ConfigManager::Instance()->GetAutoUpdateJitterMs());
+    if (dm_jitter_ms > 0) {
+      OPT_LOG(L1, (_T("[Applying DM Registration jitter][%d]"), dm_jitter_ms));
+      ::Sleep(dm_jitter_ms);
+    }
+  }
+
   // RegisterWithRequest owns the SimpleRequest being created here.
-  HRESULT hr = internal::RegisterWithRequest(new SimpleRequest,
-                                             enrollment_token,
-                                             device_id,
-                                             &dm_token);
-  if (FAILED(hr)) {
-    internal::HandleDMResponseError(
-        hr, ConfigManager::Instance()->GetPolicyResponsesDir());
-    return hr;
-  }
-
-  hr = dm_storage->StoreDmToken(dm_token);
-  if (FAILED(hr)) {
-    REPORT_LOG(LE, (_T("[StoreDmToken failed][%#x]"), hr));
-    return hr;
-  }
-
+  HRESULT hr = internal::RegisterWithRequest(dm_storage,
+                                             std::make_unique<SimpleRequest>(),
+                                             enrollment_token, device_id);
   OPT_LOG(L1, (_T("[Registration complete]")));
 
   return S_OK;
@@ -139,39 +136,29 @@ HRESULT RefreshPolicies() {
     return E_FAIL;
   }
 
-  const CPath policy_responses_dir(
-      ConfigManager::Instance()->GetPolicyResponsesDir());
   CachedPolicyInfo info;
-  HRESULT hr = DmStorage::ReadCachedPolicyInfoFile(policy_responses_dir, &info);
+  HRESULT hr = dm_storage->ReadCachedPolicyInfoFile(&info);
   if (FAILED(hr)) {
     REPORT_LOG(LW, (_T("[ReadCachedPolicyInfoFile failed][%#x]"), hr));
     // Not fatal, continue.
   }
 
-  // FetchPolicies owns the SimpleRequest being created here.
   PolicyResponses responses;
-  hr = internal::FetchPolicies(new SimpleRequest,
-                               dm_token,
-                               device_id,
-                               info,
-                               &responses);
+  hr = internal::FetchPolicies(dm_storage, std::make_unique<SimpleRequest>(),
+                               dm_token, device_id, info, &responses);
   if (FAILED(hr)) {
     REPORT_LOG(LE, (_T("[FetchPolicies failed][%#x]"), hr));
-
-    internal::HandleDMResponseError(hr, policy_responses_dir);
     return hr;
   }
 
-  hr = DmStorage::PersistPolicies(policy_responses_dir, responses);
+  hr = dm_storage->PersistPolicies(responses);
   if (FAILED(hr)) {
     REPORT_LOG(LE, (_T("[PersistPolicies failed][%#x]"), hr));
     return hr;
   }
 
   CachedOmahaPolicy dm_policy;
-  hr = DmStorage::ReadCachedOmahaPolicy(
-      ConfigManager::Instance()->GetPolicyResponsesDir(),
-      &dm_policy);
+  hr = dm_storage->ReadCachedOmahaPolicy(&dm_policy);
   if (FAILED(hr)) {
     OPT_LOG(LE, (_T("[ReadCachedOmahaPolicy failed][%#x]"), hr));
   } else {
@@ -185,12 +172,12 @@ HRESULT RefreshPolicies() {
 
 namespace internal {
 
-HRESULT RegisterWithRequest(HttpRequestInterface* http_request,
+HRESULT RegisterWithRequest(DmStorage* dm_storage,
+                            std::unique_ptr<HttpRequestInterface> http_request,
                             const CString& enrollment_token,
-                            const CString& device_id,
-                            CStringA* dm_token) {
-  ASSERT1(http_request);
-  ASSERT1(dm_token);
+                            const CString& device_id) {
+  ASSERT1(dm_storage);
+  ASSERT1(http_request.get());
 
   std::vector<std::pair<CString, CString>> query_params = {
     {_T("request"), _T("register_policy_agent")},
@@ -199,6 +186,7 @@ HRESULT RegisterWithRequest(HttpRequestInterface* http_request,
   // Make the request payload.
   CStringA payload = SerializeRegisterBrowserRequest(
       WideToUtf8(app_util::GetHostName()),
+      WideToUtf8(SystemInfo::GetSerialNumber()),
       CStringA("Windows"),
       internal::GetOsVersion());
   if (payload.IsEmpty()) {
@@ -208,32 +196,59 @@ HRESULT RegisterWithRequest(HttpRequestInterface* http_request,
 
   std::vector<uint8> response;
   HRESULT hr = SendDeviceManagementRequest(
-    http_request,
-    payload,
-    internal::FormatEnrollmentTokenAuthorizationHeader(enrollment_token),
-    device_id,
-    std::move(query_params),
-    &response);
+      std::move(http_request), payload,
+      internal::FormatEnrollmentTokenAuthorizationHeader(enrollment_token),
+      device_id, std::move(query_params), &response);
+
   if (FAILED(hr)) {
     REPORT_LOG(LE, (_T("[SendDeviceManagementRequest failed][%#x]"), hr));
+    internal::HandleDMResponseError(dm_storage, hr, response);
     return hr;
   }
 
-  hr = ParseDeviceRegisterResponse(response, dm_token);
+  CStringA dm_token;
+  hr = ParseDeviceRegisterResponse(response, &dm_token);
   if (FAILED(hr)) {
     REPORT_LOG(LE, (_T("[ParseDeviceRegisterResponse failed][%#x]"), hr));
+    return hr;
+  }
+
+  hr = dm_storage->StoreDmToken(dm_token);
+  if (FAILED(hr)) {
+    REPORT_LOG(LE, (_T("[StoreDmToken failed][%#x]"), hr));
     return hr;
   }
 
   return S_OK;
 }
 
-HRESULT FetchPolicies(HttpRequestInterface* http_request,
-                      const CString& dm_token,
-                      const CString& device_id,
+HRESULT SendPolicyValidationResultReportIfNeeded(
+    std::unique_ptr<HttpRequestInterface> http_request, const CString& dm_token,
+    const CString& device_id, const PolicyValidationResult& validation_result) {
+  const CStringA payload =
+      SerializePolicyValidationReportRequest(validation_result);
+  if (payload.IsEmpty()) return S_OK;
+
+  std::vector<std::pair<CString, CString>> query_params = {
+      {_T("request"), _T("policy_validation_report")},
+  };
+
+  std::vector<uint8> response;
+  HRESULT hr = SendDeviceManagementRequest(
+      std::move(http_request), payload,
+      FormatDMTokenAuthorizationHeader(dm_token), device_id,
+      std::move(query_params), &response);
+  REPORT_LOG(L1, (_T("[SendPolicyValidationResultReportIfNeeded][%#x]"), hr));
+  return hr;
+}
+
+HRESULT FetchPolicies(DmStorage* dm_storage,
+                      std::unique_ptr<HttpRequestInterface> http_request,
+                      const CString& dm_token, const CString& device_id,
                       const CachedPolicyInfo& info,
                       PolicyResponses* responses) {
-  ASSERT1(http_request);
+  ASSERT1(dm_storage);
+  ASSERT1(http_request.get());
   ASSERT1(!dm_token.IsEmpty());
   ASSERT1(responses);
 
@@ -242,6 +257,8 @@ HRESULT FetchPolicies(HttpRequestInterface* http_request,
   };
 
   CStringA payload = SerializePolicyFetchRequest(
+      WideToUtf8(app_util::GetHostName()),
+      WideToUtf8(SystemInfo::GetSerialNumber()),
       CStringA(kGoogleUpdateMachineLevelApps),
       info);
   if (payload.IsEmpty()) {
@@ -251,22 +268,25 @@ HRESULT FetchPolicies(HttpRequestInterface* http_request,
 
   std::vector<uint8> response;
   HRESULT hr = SendDeviceManagementRequest(
-      http_request,
-      payload,
-      FormatDMTokenAuthorizationHeader(dm_token),
-      device_id,
-      std::move(query_params),
-      &response);
+      std::move(http_request), payload,
+      FormatDMTokenAuthorizationHeader(dm_token), device_id,
+      std::move(query_params), &response);
+
   if (FAILED(hr)) {
     REPORT_LOG(LE, (_T("[SendDeviceManagementRequest failed][%#x]"), hr));
+    internal::HandleDMResponseError(dm_storage, hr, response);
     return hr;
   }
 
-  hr = ParseDevicePolicyResponse(response,
-                                 info,
-                                 dm_token,
-                                 device_id,
-                                 responses);
+  std::vector<PolicyValidationResult> validation_results;
+  hr = ParseDevicePolicyResponse(response, info, dm_token, device_id, responses,
+                                 &validation_results);
+  for (const PolicyValidationResult& validation_result : validation_results) {
+    SendPolicyValidationResultReportIfNeeded(std::make_unique<SimpleRequest>(),
+                                             dm_token, device_id,
+                                             validation_result);
+  }
+
   if (FAILED(hr)) {
     REPORT_LOG(LE, (_T("[ParseDevicePolicyResponse failed][%#x]"), hr));
     return hr;
@@ -276,13 +296,11 @@ HRESULT FetchPolicies(HttpRequestInterface* http_request,
 }
 
 HRESULT SendDeviceManagementRequest(
-    HttpRequestInterface* http_request,
-    const CStringA& payload,
-    const CString& authorization_header,
-    const CString& device_id,
+    std::unique_ptr<HttpRequestInterface> http_request, const CStringA& payload,
+    const CString& authorization_header, const CString& device_id,
     std::vector<std::pair<CString, CString>> query_params,
     std::vector<uint8>* response) {
-  ASSERT1(http_request);
+  ASSERT1(http_request.get());
   ASSERT1(response);
 
   // Get the network configuration.
@@ -302,7 +320,7 @@ HRESULT SendDeviceManagementRequest(
   request->AddHeader(_T("Authorization"), authorization_header);
 
   // Set it up
-  request->AddHttpRequest(http_request);
+  request->AddHttpRequest(http_request.release());
 
   // Form the request URL with query params.
   CString url;
@@ -344,16 +362,31 @@ HRESULT SendDeviceManagementRequest(
   return S_OK;
 }
 
-void HandleDMResponseError(HRESULT hr, const CPath& policy_responses_dir) {
+void HandleDMResponseError(DmStorage* dm_storage, HRESULT hr,
+                           const std::vector<uint8>& response) {
+  ASSERT1(dm_storage);
+
   if (hr != HRESULTFromHttpStatusCode(HTTP_STATUS_GONE)) {
     REPORT_LOG(LE, (_T("Unexpected HTTP error from the DM Server[%#x]"), hr));
     return;
   }
 
   // HTTP_STATUS_GONE implies that the device has been unenrolled.
-  // Invalidate the DM token and delete cached policies.
-  VERIFY_SUCCEEDED(DmStorage::Instance()->InvalidateDMToken());
-  DeleteBeforeOrAfterReboot(policy_responses_dir);
+  // Update the DM token and delete cached policies.
+  if (ShouldDeleteDmToken(response)) {
+    REPORT_LOG(L1, (_T("Remove DM token based on server's response.")));
+    dm_storage->DeleteDmToken();
+  } else {
+    REPORT_LOG(L1, (_T("Invalidate DM token based on server's response.")));
+    dm_storage->InvalidateDMToken();
+  }
+
+  DeleteBeforeOrAfterReboot(dm_storage->policy_responses_dir());
+
+  // Set the Omaha DM Policies to an empty CachedOmahaPolicy so that the
+  // currently-running process forgets about the policies loaded in
+  // GoopdateImpl::InitializeGoopdateAndLoadResources.
+  ConfigManager::Instance()->SetOmahaDMPolicies(CachedOmahaPolicy());
 }
 
 CString GetAgent() {
@@ -363,7 +396,7 @@ CString GetAgent() {
 }
 
 CString GetPlatform() {
-  const DWORD architecture = SystemInfo::GetProcessorArchitecture();
+  const CString architecture = SystemInfo::GetArchitecture();
 
   int major_version = 0;
   int minor_version = 0;
@@ -377,11 +410,7 @@ CString GetPlatform() {
 
   CString platform;
   SafeCStringFormat(&platform, _T("Windows NT|%s|%d.%d.0"),
-                    architecture == PROCESSOR_ARCHITECTURE_AMD64 ?
-                        _T("x86_64") :
-                        (architecture == PROCESSOR_ARCHITECTURE_INTEL ?
-                             _T("x86") :
-                             _T("")),
+                    architecture == kArchAmd64 ? _T("x86_64") : architecture,
                     major_version, minor_version);
   return platform;
 }

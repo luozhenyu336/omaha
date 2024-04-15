@@ -331,6 +331,10 @@ class App : public ModelObject {
   // disabled by Group Policy.
   HRESULT CheckGroupPolicy() const;
 
+  // Returns the target channel for the app, if the machine is joined to a
+  // domain and has the corresponding policy set.
+  CString GetTargetChannel() const;
+
   // Returns whether the RollbackToTargetVersion policy has been set for the
   // app.
   bool IsRollbackToTargetVersionAllowed() const;
@@ -464,7 +468,7 @@ class App : public ModelObject {
   int day_of_install_;
   int day_of_last_response_;
 
-  // This value is stored in ClientState but not currently populated from there.
+  // This value is stored in ClientState.
   Tristate usage_stats_enable_;
 
   // This value is stored by the clients in one of several registry locations.

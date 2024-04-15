@@ -15,7 +15,6 @@
 
 #include "omaha/setup/setup_google_update.h"
 
-#include <msi.h>
 #include <atlpath.h>
 #include <vector>
 #include "base/basictypes.h"
@@ -181,13 +180,6 @@ HRESULT SetupGoogleUpdate::FinishInstall() {
     // install failure.
     extra_code1_ = hr;
   }
-
-  // Reset kRegValueIsMSIHelperRegistered so that the MSI helper is registered
-  // on the next UA run.
-  const TCHAR* key_name = is_machine_ ? MACHINE_REG_UPDATE : USER_REG_UPDATE;
-  VERIFY_SUCCEEDED(RegKey::SetValue(key_name,
-                                     kRegValueIsMSIHelperRegistered,
-                                     static_cast<DWORD>(0)));
 
   hr = RegisterOrUnregisterCOMLocalServer(true);
   if (FAILED(hr)) {
@@ -531,83 +523,6 @@ HRESULT SetupGoogleUpdate::RegisterOrUnregisterCOMLocalServer(bool reg) {
   return S_OK;
 }
 
-// Assumes that the MSI is in the current directory.
-// To debug MSI failures, use the following statement:
-// ::MsiEnableLog(INSTALLLOGMODE_VERBOSE, _T("C:\\msi.log"), NULL);
-HRESULT SetupGoogleUpdate::InstallMsiHelper() {
-  SETUP_LOG(L3, (_T("[SetupGoogleUpdate::InstallMsiHelper]")));
-  if (!is_machine_) {
-    return S_OK;
-  }
-
-  ++metric_setup_helper_msi_install_total;
-  HighresTimer metrics_timer;
-
-  const CPath msi_path(BuildSupportFileInstallPath(kHelperInstallerName));
-  ASSERT1(File::Exists(msi_path));
-
-  // Setting INSTALLUILEVEL_NONE causes installation to be silent and not
-  // create a restore point.
-  ::MsiSetInternalUI(INSTALLUILEVEL_NONE, NULL);
-
-  // Try a normal install.
-  UINT res = ::MsiInstallProduct(msi_path, kMsiSuppressAllRebootsCmdLine);
-  if (ERROR_PRODUCT_VERSION == res) {
-    // The product may already be installed. Force a reinstall of everything.
-    SETUP_LOG(L3, (_T("[ERROR_PRODUCT_VERSION returned - forcing reinstall]")));
-    CString force_install_cmd_line;
-    SafeCStringFormat(&force_install_cmd_line,
-                      _T("REINSTALL=ALL REINSTALLMODE=vamus %s"),
-                      kMsiSuppressAllRebootsCmdLine);
-    res = ::MsiInstallProduct(msi_path, force_install_cmd_line);
-  }
-
-  HRESULT hr = HRESULT_FROM_WIN32(res);
-  if (FAILED(hr)) {
-    SETUP_LOG(L1, (_T("[MsiInstallProduct failed][0x%08x][%u]"), hr, res));
-    return hr;
-  }
-
-  metric_setup_helper_msi_install_ms.AddSample(metrics_timer.GetElapsedMs());
-  ++metric_setup_helper_msi_install_succeeded;
-  return S_OK;
-}
-
-// The MSI is uninstalled.
-// TODO(omaha): Make sure this works after deleting the MSI.
-HRESULT SetupGoogleUpdate::UninstallMsiHelper() {
-  SETUP_LOG(L3, (_T("[SetupGoogleUpdate::UninstallMsiHelper]")));
-  if (!is_machine_) {
-    return S_OK;
-  }
-
-  // Setting INSTALLUILEVEL_NONE causes installation to be silent and not
-  // create a restore point.
-  ::MsiSetInternalUI(INSTALLUILEVEL_NONE, NULL);
-
-  // MSDN says that eInstallState must be INSTALLSTATE_DEFAULT in order for the
-  // command line to be used. Therefore, instead of using INSTALLSTATE_ABSENT
-  // to uninstall, we must pass REMOVE=ALL in the command line.
-  CString uninstall_cmd_line;
-  SafeCStringFormat(&uninstall_cmd_line, _T("REMOVE=ALL %s"),
-                    kMsiSuppressAllRebootsCmdLine);
-  UINT res = ::MsiConfigureProductEx(kHelperInstallerProductGuid,
-                                     INSTALLLEVEL_DEFAULT,
-                                     INSTALLSTATE_DEFAULT,
-                                     uninstall_cmd_line);
-
-  // Ignore the product not currently installed result.
-  if ((ERROR_SUCCESS != res) && (ERROR_UNKNOWN_PRODUCT != res)) {
-    HRESULT hr = HRESULT_FROM_WIN32(res);
-    if (FAILED(hr)) {
-      SETUP_LOG(L1, (_T("[MsiInstallProduct failed][0x%08x][%u]"), hr, res));
-      return hr;
-    }
-  }
-
-  return S_OK;
-}
-
 CString SetupGoogleUpdate::BuildSupportFileInstallPath(
     const CString& filename) const {
   SETUP_LOG(L3, (_T("[SetupGoogleUpdate::BuildSupportFileInstallPath][%s]"),
@@ -684,7 +599,8 @@ HRESULT SetupGoogleUpdate::UninstallPreviousVersions() {
                _tcscmp(file_data.cFileName, _T(".")) &&
                _tcsicmp(file_data.cFileName, this_version_) &&
                _tcsicmp(file_data.cFileName, download_dir) &&
-               _tcsicmp(file_data.cFileName, install_dir)) {
+               _tcsicmp(file_data.cFileName, install_dir) &&
+               !(file_data.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) {
       // Unregister the previous version OneClick if it exists. Ignore
       // failures. The file is named npGoogleOneClick*.dll.
       CPath old_oneclick(file_or_directory);
@@ -752,12 +668,6 @@ void SetupGoogleUpdate::Uninstall() {
               (_T("[RegisterOrUnregisterCOMLocalServer failed][0x%08x]"), hr));
     ASSERT1(GOOGLEUPDATE_E_DLL_NOT_FOUND == hr ||
             HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND) == hr);
-  }
-
-  hr = UninstallMsiHelper();
-  if (FAILED(hr)) {
-    SETUP_LOG(L1, (_T("[UninstallMsiHelper failed][0x%08x]"), hr));
-    ASSERT1(HRESULT_FROM_WIN32(ERROR_INSTALL_SERVICE_FAILURE) == hr);
   }
 
   UninstallLaunchMechanisms();

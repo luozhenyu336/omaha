@@ -19,6 +19,7 @@
 
 _ONECLICK_PLUGIN_NAME = 'npGoogleOneClick'
 _UPDATE_PLUGIN_NAME = 'npGoogleUpdate'
+_MAIN_EXE_BASE_NAME = 'GoogleUpdate'
 _CRASH_HANDLER_NAME = 'GoogleCrashHandler'
 
 # List of languages that are fully supported in the current build.
@@ -97,7 +98,9 @@ VC110 = 1700  # VC2012/VC11 (not supported by the current build).
 VC120 = 1800  # VC2013/VC12
 VC140 = 1900  # VC2015/VC14
 VC150 = 1910  # VC2017 version 15.0-15.9 / VC14.1-14.16
-VC160 = 1920  # VC2019 version 16.0 / VC14.2
+VC160 = 1920  # VC2019 version 16.0 / VC14.20
+VC170 = 1930  # VC2019 version 17.0 / VC14.30
+
 
 def _IsSupportedOmaha2Version(omaha_version):
   """Returns true if omaha_version is an Omaha 2 version and is supported."""
@@ -118,13 +121,13 @@ def _GetMetainstallerPayloadFilenames(prefix,
   # TODO(omaha): Move the other filename defines in main.scons into this file
   # and allow all filenames to be customized.
   payload_files = [
-      'GoogleUpdate.exe',
+      '%s.exe' % _MAIN_EXE_BASE_NAME,
       '%s.exe' % _CRASH_HANDLER_NAME,
       '%sgoopdate.dll' % (prefix),
-      'GoogleUpdateHelper.msi',
-      'GoogleUpdateBroker.exe',
-      'GoogleUpdateOnDemand.exe',
-      'GoogleUpdateComRegisterShell64.exe',
+      '%sHelper.msi' % _MAIN_EXE_BASE_NAME,
+      '%sBroker.exe' % _MAIN_EXE_BASE_NAME,
+      '%sOnDemand.exe' % _MAIN_EXE_BASE_NAME,
+      '%sComRegisterShell64.exe' % _MAIN_EXE_BASE_NAME,
       '%spsmachine.dll' % (prefix),
       '%spsmachine_64.dll' % (prefix),
       '%spsuser.dll' % (prefix),
@@ -132,9 +135,9 @@ def _GetMetainstallerPayloadFilenames(prefix,
       ]
 
   if _IsSupportedOmaha2Version(omaha_version):
-    payload_files.remove('GoogleUpdateBroker.exe')
-    payload_files.remove('GoogleUpdateOnDemand.exe')
-    payload_files.remove('GoogleUpdateComRegisterShell64.exe')
+    payload_files.remove('%sBroker.exe' % _MAIN_EXE_BASE_NAME)
+    payload_files.remove('%sOnDemand.exe' % _MAIN_EXE_BASE_NAME)
+    payload_files.remove('%sComRegisterShell64.exe' % _MAIN_EXE_BASE_NAME)
     payload_files.remove('psmachine.dll')
     payload_files.remove('psmachine_64.dll')
     payload_files.remove('psuser.dll')
@@ -156,7 +159,14 @@ def _GetMetainstallerPayloadFilenames(prefix,
       omaha_version[1] >= 3 and
       (omaha_version[2] >= 32)):
     # added with 1.3.32.1 and later
-    payload_files.append('GoogleUpdateCore.exe')
+    payload_files.append('%sCore.exe' % _MAIN_EXE_BASE_NAME)
+
+  if (omaha_version[0] >= 1 and
+      omaha_version[1] >= 3 and
+      (omaha_version[2] > 36 or
+       (omaha_version[2] == 36 and omaha_version[3] >= 61))):
+    # GoogleUpdateHelper.msi was removed with version 1.3.36.61.
+    payload_files.remove('%sHelper.msi' % _MAIN_EXE_BASE_NAME)
 
   for language in languages:
     payload_files += ['%sgoopdateres_%s.dll' % (prefix, language)]
@@ -314,4 +324,3 @@ class SignedFileInfo(object):
 
     self.unsigned_filename_base = '%s_unsigned' % base_name
     self.unsigned_filename = '%s.%s' % (self.unsigned_filename_base, extension)
-
